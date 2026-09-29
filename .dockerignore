@@ -1,0 +1,11 @@
+**/node_modules
+**/.venv
+**/__pycache__
+frontend/dist
+backend/app/static
+models
+data
+.git
+*.stl
+*.3mf
+*.step

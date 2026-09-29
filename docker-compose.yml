@@ -1,0 +1,34 @@
+services:
+  tracer:
+    build: .
+    image: gridfinity-tracer:local
+    container_name: gridfinity-tracer
+    ports:
+      - "8080:8000"
+    volumes:
+      - models:/models   # ~330 MB of ONNX weights, downloaded on first start
+      - data:/data       # library: originals, working images, exports, SQLite
+    environment:
+      - GT_PX_PER_MM=4
+      - GT_RECTIFY_MARGIN_MM=25
+      # Retention (days). Projects untouched this long are deleted by the daily sweep.
+      - GT_RETENTION_DAYS=90
+      - GT_ORPHAN_DAYS=7
+      - GT_BLANK_DAYS=1
+      # - GT_MAX_UPLOAD_MB=50
+      # - GT_SKIP_MODEL_DOWNLOAD=1   # start without trying to download weights at all
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+
+volumes:
+  models:
+  data:
