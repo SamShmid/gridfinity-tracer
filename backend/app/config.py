@@ -1,5 +1,6 @@
 """Paths and constants. Everything is overridable by environment variables so the
 same code runs in the dev venv and inside Docker."""
+
 from __future__ import annotations
 
 import os

@@ -9,6 +9,7 @@ Coordinate convention for tool pockets: the frontend works in "layout mm" with t
 origin at the bin's top-left corner (top view), x to the right, y DOWN. We convert to
 CAD coordinates (origin at bin centre, y up) here.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -42,9 +43,9 @@ MIN_CUT_FLOOR = FLOOR_TOP
 class FingerHole:
     x: float  # layout mm
     y: float
-    diameter: float = 20.0   # width
-    length: float = 20.0     # overall length; == diameter -> round recess
-    angle_deg: float = 0.0   # layout coords (y down), degrees
+    diameter: float = 20.0  # width
+    length: float = 20.0  # overall length; == diameter -> round recess
+    angle_deg: float = 0.0  # layout coords (y down), degrees
     extra_depth: float = 3.0
 
 
@@ -166,21 +167,35 @@ def build_bin(cfg: BinConfig, pockets: list[Pocket] | None = None) -> bd.Part:
         adds = []
         for k in range(1, cfg.dividers_x + 1):
             x = -iw / 2 + iw * k / (cfg.dividers_x + 1)
-            adds.append(bd.Pos(x, 0, FLOOR_TOP) * bd.Box(DIVIDER, il, fh, align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN)))
+            adds.append(
+                bd.Pos(x, 0, FLOOR_TOP)
+                * bd.Box(DIVIDER, il, fh, align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN))
+            )
         for k in range(1, cfg.dividers_y + 1):
             y = -il / 2 + il * k / (cfg.dividers_y + 1)
-            adds.append(bd.Pos(0, y, FLOOR_TOP) * bd.Box(iw, DIVIDER, fh, align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN)))
+            adds.append(
+                bd.Pos(0, y, FLOOR_TOP)
+                * bd.Box(iw, DIVIDER, fh, align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN))
+            )
         # Scoop: quarter-round fillet along the front (-Y) inner bottom edge
         if cfg.scoop and cfg.scoop_radius > 0:
             r = min(cfg.scoop_radius, il / 2, fh)
-            block = bd.Pos(0, -il / 2, FLOOR_TOP) * bd.Box(iw, r, r, align=(bd.Align.CENTER, bd.Align.MIN, bd.Align.MIN))
+            block = bd.Pos(0, -il / 2, FLOOR_TOP) * bd.Box(
+                iw, r, r, align=(bd.Align.CENTER, bd.Align.MIN, bd.Align.MIN)
+            )
             cyl = bd.Pos(0, -il / 2 + r, FLOOR_TOP + r) * bd.Cylinder(r, iw + 2, rotation=(0, 90, 0))
             adds.append(block - cyl)
         # Label tab: shelf along the back (+Y) wall, top flush with feature_top
         if cfg.label_tab and cfg.label_width > 0:
             lw = min(cfg.label_width, il - 1, fh - 1.2)
             z_top = feature_top
-            prof = bd.Plane.YZ * bd.Polygon((il / 2, z_top), (il / 2 - lw, z_top), (il / 2 - lw, z_top - 1.2), (il / 2, z_top - 1.2 - lw), align=None)
+            prof = bd.Plane.YZ * bd.Polygon(
+                (il / 2, z_top),
+                (il / 2 - lw, z_top),
+                (il / 2 - lw, z_top - 1.2),
+                (il / 2, z_top - 1.2 - lw),
+                align=None,
+            )
             tab = bd.extrude(prof, iw / 2, both=True)
             adds.append(tab)
         if adds:
@@ -217,9 +232,23 @@ def build_bin(cfg: BinConfig, pockets: list[Pocket] | None = None) -> bd.Part:
                     for sy in (-1, 1):
                         x, y = cx + sx * off, cy + sy * off
                         if cfg.holes in ("magnet", "magnet_screw"):
-                            cutters.append(bd.Pos(x, y, -0.01) * bd.Cylinder(MAGNET_D / 2, MAGNET_H + 0.01, align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN)))
+                            cutters.append(
+                                bd.Pos(x, y, -0.01)
+                                * bd.Cylinder(
+                                    MAGNET_D / 2,
+                                    MAGNET_H + 0.01,
+                                    align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
+                                )
+                            )
                         if cfg.holes in ("screw", "magnet_screw"):
-                            cutters.append(bd.Pos(x, y, -0.01) * bd.Cylinder(SCREW_D / 2, SCREW_H + 0.01, align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN)))
+                            cutters.append(
+                                bd.Pos(x, y, -0.01)
+                                * bd.Cylinder(
+                                    SCREW_D / 2,
+                                    SCREW_H + 0.01,
+                                    align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
+                                )
+                            )
         if cutters:
             part = part.cut(*cutters)  # one boolean instead of up to 800
     return part

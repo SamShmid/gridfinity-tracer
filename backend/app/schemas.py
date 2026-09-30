@@ -5,6 +5,7 @@ push the geometry or the image pipeline into pathological territory (a 1e6 mm Ga
 would allocate a matrix with tens of millions of columns; a 0 mm STL tolerance would produce
 a gigabyte mesh). Out-of-range input is answered with a 422, never a 500.
 """
+
 from __future__ import annotations
 
 from typing import Annotated, Literal
@@ -19,7 +20,9 @@ IdStr = Annotated[str, StringConstraints(pattern=ID_PATTERN)]
 Point = tuple[float, float]
 Poly = Annotated[list[Point], Field(min_length=3, max_length=20000)]
 Quad = Annotated[list[Point], Field(min_length=4, max_length=4)]
-Name = Annotated[str, StringConstraints(max_length=2000)]  # handlers truncate to 120; a long name is not an error
+Name = Annotated[
+    str, StringConstraints(max_length=2000)
+]  # handlers truncate to 120; a long name is not an error
 
 
 class UploadResponse(BaseModel):
@@ -97,14 +100,14 @@ class WarmRequest(BaseModel):
 
 class OffsetRequest(BaseModel):
     polygon: Poly
-    clearance_mm: float = Field(0.5, ge=-2, le=10)        # fit clearance (how loose the tool sits)
-    printer_offset_mm: float = Field(0.2, ge=0, le=1)     # compensation for FDM over-extrusion / elephant foot
-    gaussian_mm: float = Field(1.0, ge=0, le=5)           # contour smoothing sigma
-    tolerance_mm: float = Field(0.3, ge=0.05, le=3)       # final simplification
-    smooth_mm: float = Field(0.0, ge=0, le=10)            # morphological open/close radius
-    bridge_mm: float = Field(1.5, ge=0, le=10)            # fill gaps narrower than 2x this (fragile slivers)
-    snap: bool = False                                    # straighten near-axis edges
-    symmetric: bool = False                               # mirror about the long axis
+    clearance_mm: float = Field(0.5, ge=-2, le=10)  # fit clearance (how loose the tool sits)
+    printer_offset_mm: float = Field(0.2, ge=0, le=1)  # compensation for FDM over-extrusion / elephant foot
+    gaussian_mm: float = Field(1.0, ge=0, le=5)  # contour smoothing sigma
+    tolerance_mm: float = Field(0.3, ge=0.05, le=3)  # final simplification
+    smooth_mm: float = Field(0.0, ge=0, le=10)  # morphological open/close radius
+    bridge_mm: float = Field(1.5, ge=0, le=10)  # fill gaps narrower than 2x this (fragile slivers)
+    snap: bool = False  # straighten near-axis edges
+    symmetric: bool = False  # mirror about the long axis
     convex: bool = False
     tool_height_mm: float = Field(0.0, ge=0, le=500)
     camera_distance_mm: float = Field(0.0, ge=0, le=10000)
@@ -121,10 +124,11 @@ class FingerHoleIn(BaseModel):
     """A finger cut. Round recess when length <= diameter; otherwise a slot (stadium) of that overall
     length rotated by angle_deg (layout coords). It goes extra_depth below the pocket floor but never
     through the base."""
+
     x: float = Field(ge=-1000, le=1000)
     y: float = Field(ge=-1000, le=1000)
-    diameter: float = Field(20.0, ge=4, le=60)      # slot width / recess diameter
-    length: float = Field(20.0, ge=4, le=200)       # slot overall length
+    diameter: float = Field(20.0, ge=4, le=60)  # slot width / recess diameter
+    length: float = Field(20.0, ge=4, le=200)  # slot overall length
     angle_deg: float = Field(0.0, ge=-360, le=360)
     extra_depth: float = Field(3.0, ge=0, le=40)
 
@@ -155,7 +159,9 @@ class GenerateRequest(BaseModel):
     pockets: list[PocketIn] = Field(default_factory=list, max_length=100)
     format: Literal["stl", "3mf", "step"] = "stl"
     tolerance: float = Field(0.05, ge=0.01, le=1)
-    filename: Annotated[str, StringConstraints(max_length=2000)] = "gridfinity-holder"  # sanitised + cut to 80 chars
+    filename: Annotated[str, StringConstraints(max_length=2000)] = (
+        "gridfinity-holder"  # sanitised + cut to 80 chars
+    )
     project_id: IdStr | None = None
     save: bool = False  # store the export (and state) in the library
     state: dict | None = None

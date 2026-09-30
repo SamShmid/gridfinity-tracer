@@ -16,6 +16,7 @@ Retention (owner's choice): projects untouched for RETENTION_DAYS are deleted, b
 (no photo, no state, no exports, no snapshot) after BLANK_DAYS, orphan image files after ORPHAN_DAYS.
 sweep() does the work; main.py runs it at startup and every 24 h.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -189,7 +190,9 @@ def _with_expiry(row: sqlite3.Row | dict) -> dict:
 
 
 # ------------------------------------------------------------------ projects
-def create_project(original: bytes, filename: str, image_id: str, width: int, height: int, paper: str, thumb_jpeg: bytes) -> str:
+def create_project(
+    original: bytes, filename: str, image_id: str, width: int, height: int, paper: str, thumb_jpeg: bytes
+) -> str:
     pid = new_id()
     check_id(image_id)
     ext = Path(filename).suffix.lower()
@@ -205,7 +208,10 @@ def create_project(original: bytes, filename: str, image_id: str, width: int, he
             "INSERT INTO projects (id, created_at, updated_at, name, paper, original_filename, original_ext, original_size, image_id, width, height) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (pid, now, now, name, paper, filename[:255], ext, len(original), image_id, width, height),
         )
-        c.execute("INSERT INTO images (id, project_id, kind, created_at) VALUES (?,?,?,?)", (image_id, pid, "upload", now))
+        c.execute(
+            "INSERT INTO images (id, project_id, kind, created_at) VALUES (?,?,?,?)",
+            (image_id, pid, "upload", now),
+        )
     return pid
 
 
@@ -330,7 +336,10 @@ def rename(pid: str, name: str, notes: str | None = None) -> bool:
         if notes is None:
             cur = c.execute("UPDATE projects SET name=?, updated_at=? WHERE id=?", (name, time.time(), pid))
         else:
-            cur = c.execute("UPDATE projects SET name=?, notes=?, updated_at=? WHERE id=?", (name, notes, time.time(), pid))
+            cur = c.execute(
+                "UPDATE projects SET name=?, notes=?, updated_at=? WHERE id=?",
+                (name, notes, time.time(), pid),
+            )
     return cur.rowcount > 0
 
 
@@ -362,7 +371,10 @@ def register_image(pid: str, image_id: str, kind: str) -> None:
     if kind not in IMAGE_KINDS:
         raise ValueError(kind)
     with _db() as c:
-        c.execute("INSERT OR REPLACE INTO images (id, project_id, kind, created_at) VALUES (?,?,?,?)", (image_id, pid, kind, time.time()))
+        c.execute(
+            "INSERT OR REPLACE INTO images (id, project_id, kind, created_at) VALUES (?,?,?,?)",
+            (image_id, pid, kind, time.time()),
+        )
 
 
 def image_project(image_id: str) -> str | None:
@@ -430,7 +442,10 @@ def sweep(now: float | None = None) -> dict:
 
     with _db() as c:
         projects = c.execute("SELECT * FROM projects").fetchall()
-        export_counts = {r["project_id"]: r["n"] for r in c.execute("SELECT project_id, COUNT(*) AS n FROM exports GROUP BY project_id")}
+        export_counts = {
+            r["project_id"]: r["n"]
+            for r in c.execute("SELECT project_id, COUNT(*) AS n FROM exports GROUP BY project_id")
+        }
     known = set()
     for p in projects:
         pid = p["id"]
@@ -440,7 +455,9 @@ def sweep(now: float | None = None) -> dict:
         if age_days > RETENTION_DAYS:
             if delete_project(pid):
                 removed["expired_projects"] += 1
-                log.info("retention: deleted project %s (%r), last updated %.0f days ago", pid, p["name"], age_days)
+                log.info(
+                    "retention: deleted project %s (%r), last updated %.0f days ago", pid, p["name"], age_days
+                )
             continue
         blank = (
             not p["original_ext"]

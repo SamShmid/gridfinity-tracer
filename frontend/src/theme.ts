@@ -22,14 +22,14 @@ export const layout = { sidebar: '380px', header: '52px', gutter: '16px' }
 /** Semantic colours. `light` and `dark` must define the same keys. */
 export const colors = {
   light: {
-    bg: '#f3f4f7',          // page background
-    panel: '#ffffff',       // cards, sidebar, canvases
-    panelAlt: '#f7f8fa',    // inputs, subtle areas
-    ink: '#16191f',         // primary text
-    muted: '#66707d',       // secondary text
-    line: '#dfe3e9',        // borders
+    bg: '#f3f4f7', // page background
+    panel: '#ffffff', // cards, sidebar, canvases
+    panelAlt: '#f7f8fa', // inputs, subtle areas
+    ink: '#16191f', // primary text
+    muted: '#66707d', // secondary text
+    line: '#dfe3e9', // borders
     lineStrong: '#bfc6cf',
-    accent: '#2563eb',      // primary actions, selection
+    accent: '#2563eb', // primary actions, selection
     accentInk: '#ffffff',
     accentSoft: 'rgba(37, 99, 235, 0.14)',
     ok: '#15803d',
@@ -37,14 +37,14 @@ export const colors = {
     danger: '#b91c1c',
     dangerSoft: 'rgba(185, 28, 28, 0.16)',
     // domain colours
-    trace: '#2563eb',       // traced outline
-    pocket: '#f59e0b',      // pocket outline with clearance, finger cuts
-    grid: '#c4cad3',        // 42 mm grid lines
-    model: '#4f8ef7',       // 3D mesh
+    trace: '#2563eb', // traced outline
+    pocket: '#f59e0b', // pocket outline with clearance, finger cuts
+    grid: '#c4cad3', // 42 mm grid lines
+    model: '#4f8ef7', // 3D mesh
     modelSelected: '#f59e0b',
-    floor: '#e6e9ee',       // 3D grid floor lines
+    floor: '#e6e9ee', // 3D grid floor lines
     floorMajor: '#aab2bd',
-    tip: '#eaf1ff',         // first-visit callouts
+    tip: '#eaf1ff', // first-visit callouts
     shadow: '0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.10)',
   },
   dark: {
@@ -85,7 +85,10 @@ export function currentMode(): Mode {
 /** Runtime accessor for TS consumers (three.js etc.). */
 export const theme = {
   color: (k: ColorKey, mode: Mode = currentMode()) => colors[mode][k],
-  fonts, space, radius, layout,
+  fonts,
+  space,
+  radius,
+  layout,
 }
 
 const kebab = (s: string) => s.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase()).replace(/^(\d)/, 'n$1')
@@ -94,7 +97,9 @@ const kebab = (s: string) => s.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase()).r
 export function applyTheme(mode: Mode = currentMode()) {
   const root = document.documentElement.style
   for (const [k, v] of Object.entries(colors[mode])) root.setProperty(`--c-${kebab(k)}`, v)
-  root.setProperty('--f-ui', fonts.ui); root.setProperty('--f-mono', fonts.mono); root.setProperty('--f-lh', String(fonts.lineHeight))
+  root.setProperty('--f-ui', fonts.ui)
+  root.setProperty('--f-mono', fonts.mono)
+  root.setProperty('--f-lh', String(fonts.lineHeight))
   for (const [k, v] of Object.entries(fonts.size)) root.setProperty(`--fs-${k}`, v)
   for (const [k, v] of Object.entries(fonts.weight)) root.setProperty(`--fw-${k}`, String(v))
   for (const [k, v] of Object.entries(space)) root.setProperty(`--sp-${k}`, v)

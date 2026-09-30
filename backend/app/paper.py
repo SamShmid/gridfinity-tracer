@@ -14,6 +14,7 @@ Detection strategy (glossy benches and glare defeat plain thresholding):
   4. Candidates are scored by rectangularity and brightness; classical contours
      remain as a fallback when SAM is unavailable.
 """
+
 from __future__ import annotations
 
 import logging
@@ -152,7 +153,15 @@ def _score(mask: np.ndarray, gray: np.ndarray) -> tuple[float, np.ndarray | None
     if area_frac < 0.04 or area_frac > 0.95:
         return 0.0, None
     h, w = mask.shape
-    touch = float(((mask[0, :] > 0).mean() + (mask[-1, :] > 0).mean() + (mask[:, 0] > 0).mean() + (mask[:, -1] > 0).mean()) / 4)
+    touch = float(
+        (
+            (mask[0, :] > 0).mean()
+            + (mask[-1, :] > 0).mean()
+            + (mask[:, 0] > 0).mean()
+            + (mask[:, -1] > 0).mean()
+        )
+        / 4
+    )
     quad = _refine_quad_from_mask(mask, quad)
     quad = _refine_quad_hough(gray, quad)
     # convexity / sanity of the refined quad
@@ -171,7 +180,15 @@ def _score(mask: np.ndarray, gray: np.ndarray) -> tuple[float, np.ndarray | None
     support = _edge_support(gray, quad)
     qfrac = float((qmask > 0).mean())
     area_prior = min(1.0, qfrac / 0.2)  # sheets should fill a good part of the frame
-    score = (rect ** 2) * (support ** 2) * (0.3 + brightness) * (0.5 + uniformity) * (paper_frac ** 2) * (1 - 0.8 * touch) * area_prior
+    score = (
+        (rect**2)
+        * (support**2)
+        * (0.3 + brightness)
+        * (0.5 + uniformity)
+        * (paper_frac**2)
+        * (1 - 0.8 * touch)
+        * area_prior
+    )
     return score, quad
 
 
@@ -180,13 +197,23 @@ def _sam_paper_masks(small: np.ndarray, blob: np.ndarray | None) -> list[np.ndar
     """Several prompt variants x 3 SAM hypotheses -> candidate paper masks (deduplicated)."""
     try:
         from .segment import get_sam
+
         sam = get_sam()
     except Exception as e:  # noqa: BLE001
         log.info("SAM unavailable for paper detection: %s", e)
         return []
     h, w = small.shape[:2]
     centre = (w / 2, h / 2)
-    frame = [(2.0, 2.0), (w - 3.0, 2.0), (w - 3.0, h - 3.0), (2.0, h - 3.0), (w / 2, 2.0), (w / 2, h - 3.0), (2.0, h / 2), (w - 3.0, h / 2)]
+    frame = [
+        (2.0, 2.0),
+        (w - 3.0, 2.0),
+        (w - 3.0, h - 3.0),
+        (2.0, h - 3.0),
+        (w / 2, 2.0),
+        (w / 2, h - 3.0),
+        (2.0, h / 2),
+        (w - 3.0, h / 2),
+    ]
     variants: list[tuple[list, list, tuple | None]] = []
     if blob is not None:
         dt = cv2.distanceTransform((blob > 0).astype(np.uint8), cv2.DIST_L2, 5)
@@ -244,7 +271,9 @@ def _refine_quad_hough(gray: np.ndarray, quad: np.ndarray, band_frac: float = 0.
         m = np.zeros_like(edges)
         cv2.fillPoly(m, [poly], 255)
         e = cv2.bitwise_and(edges, m)
-        segs = cv2.HoughLinesP(e, 1, np.pi / 360, threshold=25, minLineLength=max(10, 0.06 * L), maxLineGap=0.02 * L)
+        segs = cv2.HoughLinesP(
+            e, 1, np.pi / 360, threshold=25, minLineLength=max(10, 0.06 * L), maxLineGap=0.02 * L
+        )
         cands = []  # (offset, length, p1, p2)
         if segs is not None:
             for x1, y1, x2, y2 in segs.reshape(-1, 4):
@@ -264,7 +293,8 @@ def _refine_quad_hough(gray: np.ndarray, quad: np.ndarray, band_frac: float = 0.
             if c[0] - cur[-1][0] < 0.012 * L:
                 cur.append(c)
             else:
-                clusters.append(cur); cur = [c]
+                clusters.append(cur)
+                cur = [c]
         clusters.append(cur)
         # Strong clusters are those with at least half the length of the longest; among them
         # take the innermost: glare merges and cast shadows both lie *outside* the real edge.
@@ -290,7 +320,8 @@ def _refine_quad_hough(gray: np.ndarray, quad: np.ndarray, band_frac: float = 0.
         p2, d2 = lines[i]
         A = np.array([d1, -d2]).T
         if abs(np.linalg.det(A)) < 1e-6:
-            out.append(q[i]); continue
+            out.append(q[i])
+            continue
         s_, _ = np.linalg.solve(A, p2 - p1)
         out.append(p1 + s_ * d1)
     r = order_corners(np.array(out, np.float32))
@@ -299,11 +330,15 @@ def _refine_quad_hough(gray: np.ndarray, quad: np.ndarray, band_frac: float = 0.
     return r
 
 
-def detect_paper(img_bgr: np.ndarray, use_sam: bool = True, expected_aspect: float | None = None) -> Quad | None:
+def detect_paper(
+    img_bgr: np.ndarray, use_sam: bool = True, expected_aspect: float | None = None
+) -> Quad | None:
     """Detect the paper quadrilateral. Returns 4 ordered corners (TL, TR, BR, BL) or None."""
     h, w = img_bgr.shape[:2]
     scale = min(1.0, _WORK / max(h, w))
-    small = cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else img_bgr
+    small = (
+        cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else img_bgr
+    )
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
     candidates: list[tuple[float, np.ndarray, np.ndarray, str]] = []  # score, quad, mask, source
@@ -319,7 +354,13 @@ def detect_paper(img_bgr: np.ndarray, use_sam: bool = True, expected_aspect: flo
     for name, t in (("otsu", otsu_t), ("t+20", min(otsu_t + 20, 250)), ("t+40", min(otsu_t + 40, 250))):
         _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
         for k in (0, 31):
-            m = th if k == 0 else cv2.morphologyEx(th, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            m = (
+                th
+                if k == 0
+                else cv2.morphologyEx(
+                    th, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+                )
+            )
             comp = _largest_component(m)
             if comp is None:
                 continue
@@ -342,6 +383,7 @@ def detect_paper(img_bgr: np.ndarray, use_sam: bool = True, expected_aspect: flo
             side = (np.linalg.norm(qq[3] - qq[0]) + np.linalg.norm(qq[2] - qq[1])) / 2
             r = max(top, side) / max(min(top, side), 1e-6)
             return float(np.exp(-abs(np.log(r / expected_aspect)) / 0.12))
+
         candidates = [(c[0] * (0.5 + 0.5 * aspect_factor(c)), c[1], c[2], c[3]) for c in candidates]
     sc, q, m, src = max(candidates, key=lambda c: c[0])
     log.info("paper: %s (score %.2f) of %s", src, sc, [(c[3], round(c[0], 2)) for c in candidates])
@@ -384,7 +426,9 @@ def rectify(
     dst = np.array([[m, m], [m + pw, m], [m + pw, m + ph], [m, m + ph]], dtype=np.float32)
     H = cv2.getPerspectiveTransform(src, dst)
     out_w, out_h = int(round(pw + 2 * m)), int(round(ph + 2 * m))
-    warped = cv2.warpPerspective(img_bgr, H, (out_w, out_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    warped = cv2.warpPerspective(
+        img_bgr, H, (out_w, out_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+    )
     meta = {
         "width": out_w,
         "height": out_h,

@@ -12,6 +12,7 @@ but the heavy work is fenced off:
 Run with a single uvicorn worker: the SAM embedding cache, the preview cache and the pools live in
 this process. Scale by CPU inside the pools, not by workers.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,9 +32,9 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi import Path as PathParam  # noqa: F401
-from pydantic import StringConstraints
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import StringConstraints
 
 from . import gridfinity, library, outline, paper, segment
 from .config import DATA_DIR, MAX_UPLOAD_SIDE, MODELS_DIR, PAPER_SIZES, STATIC_DIR
@@ -126,8 +127,11 @@ async def _run_infer(fn, *args):
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(loop.run_in_executor(_infer_pool, fn, *args), INFER_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        raise HTTPException(504, f"That took too long (over {INFER_TIMEOUT_S:.0f} s). The server is probably busy, try again in a moment.") from None
+    except TimeoutError:
+        raise HTTPException(
+            504,
+            f"That took too long (over {INFER_TIMEOUT_S:.0f} s). The server is probably busy, try again in a moment.",
+        ) from None
 
 
 async def _run_cad(fn, *args):
@@ -135,9 +139,12 @@ async def _run_cad(fn, *args):
     fut: Future = _get_cad_pool().submit(fn, *args)
     try:
         return await asyncio.wait_for(asyncio.wrap_future(fut, loop=loop), CAD_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         _reset_cad_pool()
-        raise HTTPException(504, f"Building that model took over {CAD_TIMEOUT_S:.0f} s and was stopped. Try a simpler shape or fewer pockets.") from None
+        raise HTTPException(
+            504,
+            f"Building that model took over {CAD_TIMEOUT_S:.0f} s and was stopped. Try a simpler shape or fewer pockets.",
+        ) from None
 
 
 # ------------------------------------------------------------------ preview cache
@@ -201,7 +208,12 @@ library.init()
 @app.exception_handler(Exception)
 async def _unhandled(request: Request, exc: Exception):
     log.exception("unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse({"detail": "Something went wrong on the server. Try again, and check the container logs if it keeps happening."}, status_code=500)
+    return JSONResponse(
+        {
+            "detail": "Something went wrong on the server. Try again, and check the container logs if it keeps happening."
+        },
+        status_code=500,
+    )
 
 
 @app.exception_handler(library.BadId)
@@ -223,7 +235,9 @@ async def _limits_and_cache_headers(request: Request, call_next):
     if path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH"):
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > _body_limit(path):
-            return JSONResponse({"detail": f"That request is too big (max {_body_limit(path) // MB} MB)."}, status_code=413)
+            return JSONResponse(
+                {"detail": f"That request is too big (max {_body_limit(path) // MB} MB)."}, status_code=413
+            )
     resp = await call_next(request)
     # index.html must never be cached (it references hashed asset names that change on every build);
     # the hashed assets themselves can be cached forever.
@@ -291,7 +305,9 @@ def _rect_meta(rect_id: str) -> dict:
     return m
 
 
-def _outline_list(masks: list[np.ndarray], px_per_mm: float, tol: float, min_area: float, source: str) -> list[ToolOutline]:
+def _outline_list(
+    masks: list[np.ndarray], px_per_mm: float, tol: float, min_area: float, source: str
+) -> list[ToolOutline]:
     tools = []
     for m in masks:
         for poly in outline.mask_to_polygons_mm(m, px_per_mm, tolerance_mm=tol, min_area_mm2=min_area):
@@ -307,9 +323,14 @@ def _safe_filename(name: str, fallback: str = "gridfinity-holder") -> str:
 # ------------------------------------------------------------------ routes
 @app.get("/api/health")
 def health():
-    sam = all((MODELS_DIR / "sam2.1-hiera-tiny" / f).exists() for f in ("onnx/vision_encoder.onnx", "onnx/prompt_encoder_mask_decoder.onnx"))
+    sam = all(
+        (MODELS_DIR / "sam2.1-hiera-tiny" / f).exists()
+        for f in ("onnx/vision_encoder.onnx", "onnx/prompt_encoder_mask_decoder.onnx")
+    )
     u2 = Path(os.environ["U2NET_HOME"])
-    isnet = u2.exists() and any(u2.rglob("*.onnx"))  # rembg layout changed between versions; any weight file counts
+    isnet = u2.exists() and any(
+        u2.rglob("*.onnx")
+    )  # rembg layout changed between versions; any weight file counts
     return {"ok": True, "sam": sam, "models_ready": sam and isnet, "version": VERSION}
 
 
@@ -332,14 +353,22 @@ async def upload(
     try:
         img = await _run_infer(decode_image, raw, MAX_UPLOAD_SIDE)  # JPEG/PNG/WebP/TIFF/HEIC..., EXIF-rotated
     except ImageTooLarge:
-        raise HTTPException(413, f"That photo has too many pixels (max {MAX_PIXELS // 1_000_000} megapixels).") from None
+        raise HTTPException(
+            413, f"That photo has too many pixels (max {MAX_PIXELS // 1_000_000} megapixels)."
+        ) from None
     except ValueError:
         raise HTTPException(400, "Couldn't read that as a photo. Try a JPEG, PNG or HEIC.") from None
     h, w = img.shape[:2]
     image_id = library.new_id()
     ts = 360 / max(h, w)
-    thumb = cv2.imencode(".jpg", cv2.resize(img, None, fx=ts, fy=ts, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 82])[1].tobytes()
-    project_id = library.create_project(raw, Path(file.filename or "photo").name[:200], image_id, w, h, paper_size[:20], thumb)
+    thumb = cv2.imencode(
+        ".jpg",
+        cv2.resize(img, None, fx=ts, fy=ts, interpolation=cv2.INTER_AREA),
+        [cv2.IMWRITE_JPEG_QUALITY, 82],
+    )[1].tobytes()
+    project_id = library.create_project(
+        raw, Path(file.filename or "photo").name[:200], image_id, w, h, paper_size[:20], thumb
+    )
     cv2.imwrite(str(library.new_image_path("upload", project_id, image_id)), img)
     if name and name.strip():
         library.rename(project_id, name.strip()[:120])
@@ -359,7 +388,15 @@ async def upload(
     detected = quad is not None
     if quad is None:
         quad = paper.default_quad(w, h)
-    return UploadResponse(image_id=image_id, width=w, height=h, corners=quad, detected=detected, orientation=paper.paper_orientation(quad), project_id=project_id)
+    return UploadResponse(
+        image_id=image_id,
+        width=w,
+        height=h,
+        corners=quad,
+        detected=detected,
+        orientation=paper.paper_orientation(quad),
+        project_id=project_id,
+    )
 
 
 @app.get("/api/image/upload/{image_id}")
@@ -376,7 +413,9 @@ def _check_quad(corners, w: int, h: int) -> None:
     q = np.array(corners, np.float32)
     area = abs(cv2.contourArea(q.reshape(-1, 1, 2)))
     if area < 100 or not cv2.isContourConvex(paper.order_corners(q).reshape(-1, 1, 2)):
-        raise HTTPException(400, "Those corners don't make a usable rectangle. Drag each one onto a corner of the paper.")
+        raise HTTPException(
+            400, "Those corners don't make a usable rectangle. Drag each one onto a corner of the paper."
+        )
     if (q < -2 * max(w, h)).any() or (q > 3 * max(w, h)).any():
         raise HTTPException(400, "Those corners are way outside the photo.")
 
@@ -406,14 +445,22 @@ async def rectify(req: RectifyRequest):
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001  (singular homography)
-        raise HTTPException(400, "Those corners don't make a usable rectangle. Drag each one onto a corner of the paper.") from None
+        raise HTTPException(
+            400, "Those corners don't make a usable rectangle. Drag each one onto a corner of the paper."
+        ) from None
     rect_id = library.new_id()
     png = library.new_image_path("rect", pid, rect_id)
     cv2.imwrite(str(png), warped)
     library.write_json(png.with_suffix(".json"), meta)
     with _meta_lock:
         _meta[rect_id] = meta
-    return RectifyResponse(rect_id=rect_id, **{k: meta[k] for k in ("width", "height", "px_per_mm", "margin_mm", "paper_w_mm", "paper_h_mm", "paper_px")})
+    return RectifyResponse(
+        rect_id=rect_id,
+        **{
+            k: meta[k]
+            for k in ("width", "height", "px_per_mm", "margin_mm", "paper_w_mm", "paper_h_mm", "paper_px")
+        },
+    )
 
 
 @app.post("/api/detect/auto", response_model=DetectResponse)
@@ -436,7 +483,9 @@ async def detect_auto(req: AutoDetectRequest):
         comps = [c for c in comps if (c & sheet).sum() >= 0.6 * c.sum()]
         if req.refine:
             comps = [segment.refine_mask(img, c) for c in comps]
-        return _outline_list(comps, ppm, req.tolerance_mm, req.min_area_mm2, req.method + ("+refined" if req.refine else ""))
+        return _outline_list(
+            comps, ppm, req.tolerance_mm, req.min_area_mm2, req.method + ("+refined" if req.refine else "")
+        )
 
     tools = await _run_infer(work)
     return DetectResponse(tools=tools)
@@ -451,11 +500,15 @@ async def detect_sam(req: SamRequest):
     def work():
         sam = segment.get_sam()
         sam.embed(req.rect_id, img)
-        mask = sam.predict(req.rect_id, [(p.x, p.y) for p in req.points], [p.label for p in req.points], img_bgr=img)
+        mask = sam.predict(
+            req.rect_id, [(p.x, p.y) for p in req.points], [p.label for p in req.points], img_bgr=img
+        )
         # Keep only the component(s) that contain a positive click; SAM sometimes adds stray blobs.
         comps = segment.split_components(mask, ppm, 20.0)
         pos = [(int(p.y), int(p.x)) for p in req.points if p.label == 1]
-        keep = [c for c in comps if any(0 <= y < c.shape[0] and 0 <= x < c.shape[1] and c[y, x] for y, x in pos)]
+        keep = [
+            c for c in comps if any(0 <= y < c.shape[0] and 0 <= x < c.shape[1] and c[y, x] for y, x in pos)
+        ]
         if not keep and comps:
             keep = comps[:1]
         merged = np.zeros_like(mask)
@@ -463,7 +516,9 @@ async def detect_sam(req: SamRequest):
             merged |= c
         if req.refine:
             merged = segment.refine_mask(img, merged)
-        return _outline_list([merged], ppm, req.tolerance_mm, 20.0, "sam" + ("+refined" if req.refine else ""))
+        return _outline_list(
+            [merged], ppm, req.tolerance_mm, 20.0, "sam" + ("+refined" if req.refine else "")
+        )
 
     tools = await _run_infer(work)
     return DetectResponse(tools=tools[:1])
@@ -505,18 +560,34 @@ async def sam_warm(req: WarmRequest):
 def polygon_offset(req: OffsetRequest):
     polygon = [list(p) for p in req.polygon]
     poly = outline.prepare_pocket(
-        polygon, req.clearance_mm, req.printer_offset_mm, req.gaussian_mm, req.tolerance_mm, req.smooth_mm,
-        req.snap, req.symmetric, req.convex, req.tool_height_mm, req.camera_distance_mm, req.bridge_mm,
+        polygon,
+        req.clearance_mm,
+        req.printer_offset_mm,
+        req.gaussian_mm,
+        req.tolerance_mm,
+        req.smooth_mm,
+        req.snap,
+        req.symmetric,
+        req.convex,
+        req.tool_height_mm,
+        req.camera_distance_mm,
+        req.bridge_mm,
     )
     st = outline.polygon_stats(poly)
-    return OffsetResponse(polygon=poly, area_mm2=st["area_mm2"], bbox=st["bbox"], straighten_deg=outline.straighten_angle(poly))
+    return OffsetResponse(
+        polygon=poly, area_mm2=st["area_mm2"], bbox=st["bbox"], straighten_deg=outline.straighten_angle(poly)
+    )
 
 
 @app.post("/api/generate")
 async def generate(req: GenerateRequest):
     bin_cfg = req.bin.model_dump()
     pockets = [p.model_dump() for p in req.pockets]
-    key = hashlib.sha256(json.dumps({"b": bin_cfg, "p": pockets, "f": req.format, "t": req.tolerance}, sort_keys=True, default=list).encode()).hexdigest()
+    key = hashlib.sha256(
+        json.dumps(
+            {"b": bin_cfg, "p": pockets, "f": req.format, "t": req.tolerance}, sort_keys=True, default=list
+        ).encode()
+    ).hexdigest()
     data = _preview_cache.get(key)
     if data is None:
         try:
@@ -525,7 +596,10 @@ async def generate(req: GenerateRequest):
             raise
         except Exception as e:  # noqa: BLE001  (OpenCascade rejected the geometry, or a worker died)
             log.warning("CAD generation failed: %s", e)
-            raise HTTPException(400, "Couldn't build that model. Check that pockets stay inside the bin and don't overlap each other, then try again.") from None
+            raise HTTPException(
+                400,
+                "Couldn't build that model. Check that pockets stay inside the bin and don't overlap each other, then try again.",
+            ) from None
         _preview_cache.put(key, data)
     name = _safe_filename(req.filename)
     saved = False
@@ -538,7 +612,10 @@ async def generate(req: GenerateRequest):
             saved = True
         except KeyError:
             log.warning("project %s not found; export not stored", req.project_id)
-    headers = {"Content-Disposition": f'attachment; filename="{name}.{req.format}"', "X-Saved": "1" if saved else "0"}
+    headers = {
+        "Content-Disposition": f'attachment; filename="{name}.{req.format}"',
+        "X-Saved": "1" if saved else "0",
+    }
     return Response(content=data, media_type=MEDIA[req.format], headers=headers)
 
 
@@ -635,7 +712,11 @@ def library_original(pid: IdP):
     path = library.project_dir(pid) / f"original{p['original_ext']}"
     if not path.exists():
         raise HTTPException(404, "Not found.")
-    return FileResponse(path, media_type="application/octet-stream", filename=_safe_filename(Path(p["original_filename"]).stem, "photo") + p["original_ext"])
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=_safe_filename(Path(p["original_filename"]).stem, "photo") + p["original_ext"],
+    )
 
 
 @app.get("/api/library/exports/{eid}")
@@ -646,7 +727,9 @@ def library_export(eid: IdP, download: bool = True):
     path, row = found
     media = MEDIA.get(row["format"], "application/octet-stream")
     if download:
-        return FileResponse(path, media_type=media, filename=_safe_filename(Path(row["filename"]).stem) + f".{row['format']}")
+        return FileResponse(
+            path, media_type=media, filename=_safe_filename(Path(row["filename"]).stem) + f".{row['format']}"
+        )
     return FileResponse(path, media_type=media)
 
 

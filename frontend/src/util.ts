@@ -9,7 +9,11 @@ export function numOr(v: string, prev: number): number {
 
 /** Unique id for tools. crypto.randomUUID is missing on plain-http LAN origins, so fall back. */
 export function uid(): string {
-  try { if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID() } catch { /* not a secure context */ }
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  } catch {
+    /* not a secure context */
+  }
   return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
 }
 
@@ -42,4 +46,8 @@ export function sourceLabel(source: string): string {
 }
 
 /** A safe file name: spaces become dashes, anything but letters, digits, - and _ is dropped. */
-export const safeFileName = (s: string) => s.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-_]/g, '')
+export const safeFileName = (s: string) =>
+  s
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-zA-Z0-9-_]/g, '')

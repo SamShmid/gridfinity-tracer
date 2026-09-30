@@ -2,6 +2,7 @@
 
 Run once after install (and in the Docker image build) so the app works offline.
 """
+
 from __future__ import annotations
 
 import os

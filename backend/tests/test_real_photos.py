@@ -5,6 +5,7 @@ the detector returns a quad whose long/short ratio is within 8% of Letter's 1.29
 area is a sensible fraction of the frame. Outline accuracy is checked by eye with
 scripts/batch_eval.py.
 """
+
 from __future__ import annotations
 
 import glob
@@ -20,7 +21,9 @@ from app import paper  # noqa: E402
 from app.config import MAX_UPLOAD_SIDE  # noqa: E402
 from app.imageio import decode_image  # noqa: E402
 
-PHOTOS = sorted(glob.glob(str(Path(__file__).resolve().parent.parent.parent / "gridfinity-tracer-photos" / "*.HEIC")))
+PHOTOS = sorted(
+    glob.glob(str(Path(__file__).resolve().parent.parent.parent / "gridfinity-tracer-photos" / "*.HEIC"))
+)
 LETTER = 279.4 / 215.9
 
 

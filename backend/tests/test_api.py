@@ -3,6 +3,7 @@
 conftest.py points GT_DATA_DIR at a temp dir before anything imports app.config, so nothing here can
 touch a real data volume.
 """
+
 from __future__ import annotations
 
 import io
@@ -23,10 +24,24 @@ from app.gridfinity import BinConfig, build_bin  # noqa: E402
 from app.main import MAX_UPLOAD_BYTES, app  # noqa: E402
 from tests.synth import make_photo  # noqa: E402
 
-assert "gt-test-data-" in str(DATA_DIR) or os.environ.get("GT_DATA_DIR"), "tests must run against a temp data dir"
+assert "gt-test-data-" in str(DATA_DIR) or os.environ.get("GT_DATA_DIR"), (
+    "tests must run against a temp data dir"
+)
 
-BIN = {"grid_x": 2, "grid_y": 1, "height_units": 3, "lip": "regular", "holes": "none", "solid": True,
-       "dividers_x": 0, "dividers_y": 0, "scoop": False, "scoop_radius": 10, "label_tab": False, "label_width": 13}
+BIN = {
+    "grid_x": 2,
+    "grid_y": 1,
+    "height_units": 3,
+    "lip": "regular",
+    "holes": "none",
+    "solid": True,
+    "dividers_x": 0,
+    "dividers_y": 0,
+    "scoop": False,
+    "scoop_radius": 10,
+    "label_tab": False,
+    "label_width": 13,
+}
 # A rectangle with a notch cut out of one long side (concave), plus a finger slot.
 NOTCHED = [[10, 10], [70, 10], [70, 30], [45, 30], [45, 22], [35, 22], [35, 30], [10, 30]]
 
@@ -81,7 +96,9 @@ def test_traversal_ids_rejected_and_nothing_deleted(client):
     assert sorted(p.name for p in DATA_DIR.iterdir()) == before
     assert client.get(f"/api/library/{pid}").status_code == 200
     # body ids go through the same pattern
-    r = client.post("/api/rectify", json={"image_id": "../../etc", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]]})
+    r = client.post(
+        "/api/rectify", json={"image_id": "../../etc", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+    )
     assert r.status_code == 422
     r = client.post("/api/sam/warm", json={"rect_id": ".."})
     assert r.status_code == 422
@@ -93,7 +110,9 @@ def test_traversal_ids_rejected_and_nothing_deleted(client):
 # ------------------------------------------------------------------ limits
 def test_oversized_upload_413(client):
     big = b"\0" * (MAX_UPLOAD_BYTES + 1024)
-    r = client.post("/api/upload", files={"file": ("big.jpg", big, "image/jpeg")}, data={"paper_size": "letter"})
+    r = client.post(
+        "/api/upload", files={"file": ("big.jpg", big, "image/jpeg")}, data={"paper_size": "letter"}
+    )
     assert r.status_code == 413
     assert "too big" in r.json()["detail"]
     assert "—" not in r.json()["detail"]
@@ -101,14 +120,25 @@ def test_oversized_upload_413(client):
 
 def test_oversized_snapshot_and_state_413(client):
     pid = client.post("/api/library/new", json={"name": "limits"}).json()["project_id"]
-    r = client.post(f"/api/library/{pid}/snapshot", files={"file": ("s.png", b"\x89PNG\r\n\x1a\n" + b"\0" * (3 * 1024 * 1024 + 10), "image/png")})
+    r = client.post(
+        f"/api/library/{pid}/snapshot",
+        files={"file": ("s.png", b"\x89PNG\r\n\x1a\n" + b"\0" * (3 * 1024 * 1024 + 10), "image/png")},
+    )
     assert r.status_code == 413
-    r = client.post(f"/api/library/{pid}/state", content=b'{"x": "' + b"a" * (2 * 1024 * 1024 + 10) + b'"}', headers={"content-type": "application/json"})
+    r = client.post(
+        f"/api/library/{pid}/state",
+        content=b'{"x": "' + b"a" * (2 * 1024 * 1024 + 10) + b'"}',
+        headers={"content-type": "application/json"},
+    )
     assert r.status_code == 413
 
 
 def test_bad_image_400(client):
-    r = client.post("/api/upload", files={"file": ("nope.jpg", b"definitely not a photo", "image/jpeg")}, data={"paper_size": "letter"})
+    r = client.post(
+        "/api/upload",
+        files={"file": ("nope.jpg", b"definitely not a photo", "image/jpeg")},
+        data={"paper_size": "letter"},
+    )
     assert r.status_code == 400
     assert "photo" in r.json()["detail"].lower()
 
@@ -124,7 +154,9 @@ def test_megapixel_limit_413(client):
     import zlib
 
     png[29:33] = zlib.crc32(bytes(png[12:29])).to_bytes(4, "big")  # keep the IHDR CRC valid
-    r = client.post("/api/upload", files={"file": ("huge.png", bytes(png), "image/png")}, data={"paper_size": "letter"})
+    r = client.post(
+        "/api/upload", files={"file": ("huge.png", bytes(png), "image/png")}, data={"paper_size": "letter"}
+    )
     assert r.status_code == 413, r.text
     assert "megapixel" in r.json()["detail"]
 
@@ -132,25 +164,62 @@ def test_megapixel_limit_413(client):
 def test_bounds_422(client):
     base = {"polygon": [[0, 0], [50, 0], [50, 20], [0, 20]]}
     assert client.post("/api/polygon/offset", json=base).status_code == 200
-    for bad in ({"gaussian_mm": 1e6}, {"clearance_mm": 50}, {"tolerance_mm": 0}, {"bridge_mm": -1}, {"printer_offset_mm": 2}):
+    for bad in (
+        {"gaussian_mm": 1e6},
+        {"clearance_mm": 50},
+        {"tolerance_mm": 0},
+        {"bridge_mm": -1},
+        {"printer_offset_mm": 2},
+    ):
         r = client.post("/api/polygon/offset", json={**base, **bad})
         assert r.status_code == 422, bad
     # polygons need 3 points, points need exactly 2 coordinates
     assert client.post("/api/polygon/offset", json={"polygon": [[0, 0], [1, 1]]}).status_code == 422
-    assert client.post("/api/polygon/offset", json={"polygon": [[0, 0, 0], [1, 1, 1], [2, 0, 0]]}).status_code == 422
+    assert (
+        client.post("/api/polygon/offset", json={"polygon": [[0, 0, 0], [1, 1, 1], [2, 0, 0]]}).status_code
+        == 422
+    )
     assert client.post("/api/polygon/offset", json={"polygon": []}).status_code == 422
     for bad in ({"height_units": 0}, {"grid_x": 11}, {"scoop_radius": 0}, {"label_width": 41}):
         r = client.post("/api/generate", json={"bin": {**BIN, **bad}, "pockets": []})
         assert r.status_code == 422, bad
     assert client.post("/api/generate", json={"bin": BIN, "pockets": [], "tolerance": 0}).status_code == 422
-    assert client.post("/api/generate", json={"bin": BIN, "pockets": [{"polygon": NOTCHED, "depth": 500}]}).status_code == 422
-    assert client.post("/api/generate", json={"bin": BIN, "pockets": [{"polygon": NOTCHED, "depth": 10, "finger_holes": [{"x": 0, "y": 0, "diameter": 1}]}]}).status_code == 422
+    assert (
+        client.post(
+            "/api/generate", json={"bin": BIN, "pockets": [{"polygon": NOTCHED, "depth": 500}]}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/api/generate",
+            json={
+                "bin": BIN,
+                "pockets": [
+                    {"polygon": NOTCHED, "depth": 10, "finger_holes": [{"x": 0, "y": 0, "diameter": 1}]}
+                ],
+            },
+        ).status_code
+        == 422
+    )
     # degenerate corners are a 400, not a 500
-    up = client.post("/api/upload", files={"file": ("p.png", _png_bytes(), "image/png")}, data={"paper_size": "letter"})
+    up = client.post(
+        "/api/upload", files={"file": ("p.png", _png_bytes(), "image/png")}, data={"paper_size": "letter"}
+    )
     assert up.status_code == 200
-    r = client.post("/api/rectify", json={"image_id": up.json()["image_id"], "corners": [[5, 5], [5, 5], [5, 5], [5, 5]], "paper": "letter"})
+    r = client.post(
+        "/api/rectify",
+        json={
+            "image_id": up.json()["image_id"],
+            "corners": [[5, 5], [5, 5], [5, 5], [5, 5]],
+            "paper": "letter",
+        },
+    )
     assert r.status_code == 400
-    r = client.post("/api/rectify", json={"image_id": up.json()["image_id"], "corners": [[0, 0], [1, 0], [1, 1]], "paper": "letter"})
+    r = client.post(
+        "/api/rectify",
+        json={"image_id": up.json()["image_id"], "corners": [[0, 0], [1, 0], [1, 1]], "paper": "letter"},
+    )
     assert r.status_code == 422
 
 
@@ -158,7 +227,15 @@ def test_bounds_422(client):
 def test_generate_with_notch_and_unicode_filename(client):
     body = {
         "bin": BIN,
-        "pockets": [{"polygon": NOTCHED, "depth": 10, "finger_holes": [{"x": 20, "y": 20, "diameter": 8, "length": 8, "angle_deg": 0, "extra_depth": 3}]}],
+        "pockets": [
+            {
+                "polygon": NOTCHED,
+                "depth": 10,
+                "finger_holes": [
+                    {"x": 20, "y": 20, "diameter": 8, "length": 8, "angle_deg": 0, "extra_depth": 3}
+                ],
+            }
+        ],
         "format": "stl",
         "filename": "héllo wörld/../中文 bin",
     }
@@ -194,7 +271,17 @@ def test_generate_with_notch_and_unicode_filename(client):
 
 def test_hollow_lip_none_features_stay_below_rim():
     for units in (2, 4):
-        cfg = BinConfig(grid_x=2, grid_y=1, height_units=units, lip="none", solid=False, dividers_x=1, dividers_y=1, scoop=True, label_tab=True)
+        cfg = BinConfig(
+            grid_x=2,
+            grid_y=1,
+            height_units=units,
+            lip="none",
+            solid=False,
+            dividers_x=1,
+            dividers_y=1,
+            scoop=True,
+            label_tab=True,
+        )
         part = build_bin(cfg)
         bb = part.bounding_box()
         assert abs(bb.max.Z - 7 * units) < 0.05, (units, bb.max.Z)
@@ -205,14 +292,21 @@ def test_hollow_lip_none_features_stay_below_rim():
 
 # ------------------------------------------------------------------ pipeline round trip
 def test_upload_rectify_images_live_in_project_folder(client):
-    r = client.post("/api/upload", files={"file": ("bench.jpg", _photo_jpeg(), "image/jpeg")}, data={"paper_size": "letter", "name": "round trip"})
+    r = client.post(
+        "/api/upload",
+        files={"file": ("bench.jpg", _photo_jpeg(), "image/jpeg")},
+        data={"paper_size": "letter", "name": "round trip"},
+    )
     assert r.status_code == 200, r.text
     up = r.json()
     pid, image_id = up["project_id"], up["image_id"]
     assert (library.project_dir(pid) / f"upload_{image_id}.png").exists()
     assert not (DATA_DIR / f"upload_{image_id}.png").exists()
     assert client.get(f"/api/image/upload/{image_id}").status_code == 200
-    r = client.post("/api/rectify", json={"image_id": image_id, "corners": up["corners"], "paper": "letter", "orientation": "auto"})
+    r = client.post(
+        "/api/rectify",
+        json={"image_id": image_id, "corners": up["corners"], "paper": "letter", "orientation": "auto"},
+    )
     assert r.status_code == 200, r.text
     rect_id = r.json()["rect_id"]
     assert (library.project_dir(pid) / f"rect_{rect_id}.png").exists()
@@ -251,7 +345,10 @@ def test_health(client):
 # ------------------------------------------------------------------ retention
 def _set_times(pid: str, updated: float, created: float | None = None):
     with library._db() as c:
-        c.execute("UPDATE projects SET updated_at=?, created_at=? WHERE id=?", (updated, created if created is not None else updated, pid))
+        c.execute(
+            "UPDATE projects SET updated_at=?, created_at=? WHERE id=?",
+            (updated, created if created is not None else updated, pid),
+        )
 
 
 def test_retention_sweep(client):
@@ -273,7 +370,9 @@ def test_retention_sweep(client):
     legacy_fresh.write_bytes(b"x")
 
     removed = library.sweep(now)
-    assert removed["expired_projects"] >= 1 and removed["blank_projects"] >= 1 and removed["orphan_files"] == 1
+    assert (
+        removed["expired_projects"] >= 1 and removed["blank_projects"] >= 1 and removed["orphan_files"] == 1
+    )
     ids = {p["id"] for p in client.get("/api/library").json()["projects"]}
     assert old not in ids and blank_old not in ids
     assert fresh in ids and blank_new in ids

@@ -3,6 +3,7 @@ honouring EXIF orientation and downscaling to a maximum side length.
 
 The pixel count is checked from the header (Image.open is lazy) before any pixel is decoded, so a
 decompression bomb is refused instead of allocating gigabytes."""
+
 from __future__ import annotations
 
 import io

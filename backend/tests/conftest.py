@@ -5,6 +5,7 @@
 2. onnxruntime / rembg sessions can abort ("recursive_mutex lock failed") during interpreter teardown
    after the tests have already passed. Exit hard once pytest has printed its summary so the process
    exit code reflects the test result, not the teardown crash."""
+
 import os
 import sys
 import tempfile

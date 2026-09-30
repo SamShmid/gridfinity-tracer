@@ -1,4 +1,5 @@
 """Synthetic test photo: Letter sheet under perspective on a dark bench with a known tool."""
+
 from __future__ import annotations
 
 import cv2
@@ -22,7 +23,15 @@ def make_photo(w=1600, h=1200, px_per_mm=4.0, silver=False, seed=0):
     canvas_w, canvas_h = int(pw * px_per_mm * 1.35), int(ph * px_per_mm * 1.45)
     img = np.full((canvas_h, canvas_w, 3), (70, 75, 80), np.uint8)  # dark bench
     ox, oy = int(canvas_w * 0.12), int(canvas_h * 0.13)
-    paper = np.array([[ox, oy], [ox + pw * px_per_mm, oy], [ox + pw * px_per_mm, oy + ph * px_per_mm], [ox, oy + ph * px_per_mm]], np.float32)
+    paper = np.array(
+        [
+            [ox, oy],
+            [ox + pw * px_per_mm, oy],
+            [ox + pw * px_per_mm, oy + ph * px_per_mm],
+            [ox, oy + ph * px_per_mm],
+        ],
+        np.float32,
+    )
     cv2.fillPoly(img, [paper.astype(np.int32)], (236, 238, 240))
     body, handle = tool_polygon_mm()
     colour = (185, 188, 190) if silver else (35, 38, 40)

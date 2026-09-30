@@ -6,6 +6,7 @@ Three tiers, all CPU:
   * sam        - SAM 2.1 hiera-tiny (ONNX): click-to-segment with add/remove points,
                  for reflective or multi-material tools the others miss.
 """
+
 from __future__ import annotations
 
 import threading
@@ -35,12 +36,14 @@ def classical_mask(img_bgr: np.ndarray, paper_px: list[float] | None = None) -> 
         # Otsu assumes "dark = tool"; the bench outside the sheet is dark too, so clip to the paper.
         x0, y0, x1, y1 = [int(round(v)) for v in paper_px]
         keep = np.zeros_like(mask)
-        keep[max(y0, 0):y1, max(x0, 0):x1] = True
+        keep[max(y0, 0) : y1, max(x0, 0) : x1] = True
         mask &= keep
     return mask
 
 
-def split_components(mask: np.ndarray, px_per_mm: float = PX_PER_MM, min_area_mm2: float = 100.0) -> list[np.ndarray]:
+def split_components(
+    mask: np.ndarray, px_per_mm: float = PX_PER_MM, min_area_mm2: float = 100.0
+) -> list[np.ndarray]:
     """Split a mask into one mask per connected component, largest first."""
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     min_px = min_area_mm2 * px_per_mm * px_per_mm
@@ -127,7 +130,10 @@ class Sam2:
                 continue
             try:
                 rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                x = cv2.resize(rgb, (_SAM_SIZE, _SAM_SIZE), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+                x = (
+                    cv2.resize(rgb, (_SAM_SIZE, _SAM_SIZE), interpolation=cv2.INTER_AREA).astype(np.float32)
+                    / 255.0
+                )
                 x = ((x - _MEAN) / _STD).transpose(2, 0, 1)[None]
                 emb = self.enc.run(None, {"pixel_values": x})
                 with self._lock:
@@ -145,12 +151,26 @@ class Sam2:
         with self._lock:
             self._cache.pop(key, None)
 
-    def predict(self, key: str, points: list[tuple[float, float]], labels: list[int], box: tuple[float, float, float, float] | None = None, img_bgr: np.ndarray | None = None) -> np.ndarray:
+    def predict(
+        self,
+        key: str,
+        points: list[tuple[float, float]],
+        labels: list[int],
+        box: tuple[float, float, float, float] | None = None,
+        img_bgr: np.ndarray | None = None,
+    ) -> np.ndarray:
         """points in image pixels; labels 1=foreground, 0=background. Returns the best mask."""
         masks, iou = self.predict_all(key, points, labels, box, img_bgr)
         return masks[int(np.argmax(iou))]
 
-    def predict_all(self, key: str, points: list[tuple[float, float]], labels: list[int], box: tuple[float, float, float, float] | None = None, img_bgr: np.ndarray | None = None) -> tuple[list[np.ndarray], np.ndarray]:
+    def predict_all(
+        self,
+        key: str,
+        points: list[tuple[float, float]],
+        labels: list[int],
+        box: tuple[float, float, float, float] | None = None,
+        img_bgr: np.ndarray | None = None,
+    ) -> tuple[list[np.ndarray], np.ndarray]:
         """All three SAM mask hypotheses (full resolution, bool) and their predicted IoUs.
 
         If the embedding for `key` was evicted (other clients' images pushed it out of the small cache)
@@ -187,7 +207,10 @@ class Sam2:
                 "image_embeddings.2": emb[2],
             },
         )
-        out = [cv2.resize(masks[0, 0, i], (w, h), interpolation=cv2.INTER_LINEAR) > 0 for i in range(masks.shape[2])]
+        out = [
+            cv2.resize(masks[0, 0, i], (w, h), interpolation=cv2.INTER_LINEAR) > 0
+            for i in range(masks.shape[2])
+        ]
         return out, iou[0, 0]
 
 
@@ -262,7 +285,13 @@ def _isnet_crop(crop: np.ndarray) -> np.ndarray | None:
         return None
 
 
-def refine_mask(img_bgr: np.ndarray, mask: np.ndarray, margin_frac: float = 0.3, min_side: int = 512, min_iou: float = 0.85) -> np.ndarray:
+def refine_mask(
+    img_bgr: np.ndarray,
+    mask: np.ndarray,
+    margin_frac: float = 0.3,
+    min_side: int = 512,
+    min_iou: float = 0.85,
+) -> np.ndarray:
     """Re-segment a tool on a crop around it (3-5x more pixels per mm for the models) and keep the
     best candidate.
 

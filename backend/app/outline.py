@@ -1,4 +1,5 @@
 """Masks -> polygons in millimetres, plus simplification and clearance offsets."""
+
 from __future__ import annotations
 
 import cv2
@@ -61,7 +62,9 @@ def clean_polygon(poly: PolyMM) -> Polygon | None:
     return _largest_polygon(p)
 
 
-def offset_polygon(poly: PolyMM, clearance_mm: float, tolerance_mm: float = 0.2, smooth_mm: float = 0.0) -> PolyMM:
+def offset_polygon(
+    poly: PolyMM, clearance_mm: float, tolerance_mm: float = 0.2, smooth_mm: float = 0.0
+) -> PolyMM:
     """Inflate (or deflate) a polygon by clearance_mm with round joins.
 
     smooth_mm > 0 applies a morphological open/close (erode then dilate and back),
@@ -218,14 +221,17 @@ def snap_edges(poly: PolyMM, tol_deg: float = 6.0, min_len_mm: float = 4.0) -> P
     for i in range(n):
         prev, cur = lines[(i - 1) % n], lines[i]
         if prev is None or cur is None:
-            out.append(pts[i]); continue
+            out.append(pts[i])
+            continue
         if not prev[2] and not cur[2]:
-            out.append(pts[i]); continue
+            out.append(pts[i])
+            continue
         p1, d1, _ = prev
         p2, d2, _ = cur
         A = np.array([d1, -d2]).T
         if abs(np.linalg.det(A)) < 1e-3:
-            out.append(pts[i]); continue
+            out.append(pts[i])
+            continue
         s, _ = np.linalg.solve(A, p2 - p1)
         q = p1 + s * d1
         if np.linalg.norm(q - pts[i]) > 3.0:  # never move a vertex far; keep the original instead
@@ -287,7 +293,9 @@ def prepare_pocket(
         # between hex keys) that would otherwise become fragile slivers of bin wall.
         p = clean_polygon(poly)
         if p is not None:
-            closed = _largest_polygon(p.buffer(bridge_mm, join_style="round").buffer(-bridge_mm, join_style="round"))
+            closed = _largest_polygon(
+                p.buffer(bridge_mm, join_style="round").buffer(-bridge_mm, join_style="round")
+            )
             if closed is not None:
                 poly = [[float(x), float(y)] for x, y in closed.exterior.coords[:-1]]
     if smooth_mm > 0:

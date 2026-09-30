@@ -7,7 +7,7 @@ from shapely.geometry import Polygon
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import outline, paper, segment  # noqa: E402
-from app.config import SAM_DIR, MODELS_DIR  # noqa: E402
+from app.config import MODELS_DIR, SAM_DIR  # noqa: E402
 from app.gridfinity import BinConfig, Pocket, build_bin, export_bytes  # noqa: E402
 from tests.synth import LETTER, make_photo  # noqa: E402
 

@@ -2,6 +2,7 @@
 
 usage: python scripts/batch_eval.py <photo_dir> <out_dir> [method=auto|classical]
 """
+
 from __future__ import annotations
 
 import glob
@@ -24,7 +25,11 @@ def main():
     src, out = sys.argv[1], sys.argv[2]
     method = sys.argv[3] if len(sys.argv) > 3 else "auto"
     os.makedirs(out, exist_ok=True)
-    files = sorted(f for f in glob.glob(f"{src}/*") if f.lower().endswith((".heic", ".heif", ".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff")))
+    files = sorted(
+        f
+        for f in glob.glob(f"{src}/*")
+        if f.lower().endswith((".heic", ".heif", ".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"))
+    )
     for f in files:
         name = Path(f).stem
         t0 = time.time()
@@ -36,7 +41,15 @@ def main():
             cv2.polylines(ov, [np.array(quad, np.int32)], True, (0, 0, 255), 6)
             for i, (x, y) in enumerate(quad):
                 cv2.circle(ov, (int(x), int(y)), 18, (0, 255, 0), -1)
-                cv2.putText(ov, "TL TR BR BL".split()[i], (int(x) + 20, int(y)), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+                cv2.putText(
+                    ov,
+                    "TL TR BR BL".split()[i],
+                    (int(x) + 20, int(y)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.5,
+                    (0, 255, 0),
+                    3,
+                )
         cv2.imwrite(f"{out}/{name}_1_paper.jpg", cv2.resize(ov, None, fx=0.4, fy=0.4))
         if quad is None:
             print(f"{name}: paper NOT found ({t1 - t0:.1f}s)")
@@ -62,10 +75,20 @@ def main():
                 cv2.polylines(ov, [pts], True, (0, 0, 255), 3)
                 st = outline.polygon_stats(poly)
                 bx = st["bbox"]
-                cv2.putText(ov, f"{bx[2]-bx[0]:.0f}x{bx[3]-bx[1]:.0f}mm", (pts[0][0], pts[0][1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(
+                    ov,
+                    f"{bx[2] - bx[0]:.0f}x{bx[3] - bx[1]:.0f}mm",
+                    (pts[0][0], pts[0][1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    2,
+                )
                 n += 1
         cv2.imwrite(f"{out}/{name}_2_{method}.jpg", cv2.resize(ov, None, fx=0.6, fy=0.6))
-        print(f"{name}: paper ok ({orient}), {n} tools, detect {t1-t0:.1f}s rectify {t2-t1:.1f}s {method} {t3-t2:.1f}s")
+        print(
+            f"{name}: paper ok ({orient}), {n} tools, detect {t1 - t0:.1f}s rectify {t2 - t1:.1f}s {method} {t3 - t2:.1f}s"
+        )
 
 
 if __name__ == "__main__":
