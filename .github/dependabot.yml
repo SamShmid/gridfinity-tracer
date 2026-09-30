@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # pyproject.toml ranges. Note: Dependabot does not read requirements.lock; after merging a bump,
+  # regenerate it (README, "Dependencies").
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: monthly
+    ignore:
+      # three is pinned on purpose: StlViewer patches OrbitControls internals.
+      - dependency-name: three
+      - dependency-name: "@types/three"
+      # React 18 until the UI is validated on 19.
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly

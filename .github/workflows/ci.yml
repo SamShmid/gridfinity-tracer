@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run format:check
+      - run: npx tsc --noEmit
+      - run: npx vite build
+      # Advisory only: a new upstream advisory should not block unrelated changes.
+      - run: npm audit --audit-level=high
+        continue-on-error: true
+
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # No model weights on CI: the tests that need SAM / IS-Net skip themselves.
+      GT_MODELS_DIR: ${{ github.workspace }}/.ci-no-models
+      U2NET_HOME: ${{ github.workspace }}/.ci-no-models/u2net
+    steps:
+      - uses: actions/checkout@v5
+      # Same runtime libs the Dockerfile installs (OpenCascade / opencv-headless).
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglu1-mesa libxrender1 libxext6 libsm6 libgomp1 libfontconfig1
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.21"
+          enable-cache: true
+          cache-dependency-glob: backend/requirements.lock
+      - name: Install (pinned runtime from the hashed lock, then dev tools)
+        run: |
+          uv venv --python 3.12
+          uv pip install --require-hashes -r requirements.lock
+          uv pip install -e ".[dev]"
+      - run: .venv/bin/ruff format --check .
+      - run: .venv/bin/ruff check .
+      # test_real_photos.py needs the SAM weights to pass (the classical fallback cannot find the sheet
+      # on the glossy-bench photos) and only skips when the photos are absent, so it is left out here.
+      - run: .venv/bin/python -m pytest -q --ignore=tests/test_real_photos.py

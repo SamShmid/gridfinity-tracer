@@ -6,6 +6,9 @@ backend/app/static
 models
 data
 .git
+.github
+docs
+gridfinity-tracer-photos
 *.stl
 *.3mf
 *.step

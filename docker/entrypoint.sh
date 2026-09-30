@@ -33,10 +33,18 @@ if [ "$(id -u)" = "0" ] && id "$APP_USER" >/dev/null 2>&1; then
   exec setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups "$0" "$@"
 fi
 
-if [ -s "$MODELS_DIR/sam2.1-hiera-tiny/onnx/vision_encoder.onnx" ] && [ -n "$(find "$MODELS_DIR/u2net" -name '*.onnx' 2>/dev/null | head -1)" ]; then
+# Go offline only when EVERY weight file is present. Each SAM graph is an .onnx plus a large
+# .onnx_data; an interrupted first start can leave the small .onnx without its data file, and
+# gating on that alone would make every later start refuse to download the rest.
+SAM_ONNX="$MODELS_DIR/sam2.1-hiera-tiny/onnx"
+if [ -s "$SAM_ONNX/vision_encoder.onnx" ] && [ -s "$SAM_ONNX/vision_encoder.onnx_data" ] \
+   && [ -s "$SAM_ONNX/prompt_encoder_mask_decoder.onnx" ] && [ -s "$SAM_ONNX/prompt_encoder_mask_decoder.onnx_data" ] \
+   && [ -n "$(find "$MODELS_DIR/u2net" -name '*.onnx' 2>/dev/null | head -1)" ]; then
   export HF_HUB_OFFLINE=1
   echo "[gridfinity-tracer] model weights present in $MODELS_DIR; running offline"
 fi
+# download_models.py re-checks size + sha256 of every SAM file and drops HF_HUB_OFFLINE itself if
+# one turns out to be missing or corrupt, so a retry always has network access.
 
 if [ "${GT_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   echo "[gridfinity-tracer] checking model weights in $MODELS_DIR ..."
