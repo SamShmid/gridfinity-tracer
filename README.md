@@ -142,7 +142,7 @@ edge, wall 0.95 mm. All in `backend/app/gridfinity.py`.
 
 | Part | What |
 |---|---|
-| Backend | Python 3.12, FastAPI + uvicorn, OpenCV (paper detection, homography), ONNX Runtime on CPU, Shapely (polygon offsets), build123d on OpenCascade (CAD + export), Pillow + pillow-heif (image decoding), SQLite (library) |
+| Backend | Python 3.12, FastAPI + uvicorn, OpenCV (paper detection, homography), ONNX Runtime on CPU, Shapely (polygon offsets), build123d on OpenCascade (CAD + export), Pillow + pi-heif (image decoding), SQLite (library) |
 | Frontend | React 18, TypeScript, Vite, three.js (3D preview) |
 | Packaging | One Docker image: Node builds the frontend, then `python:3.12-slim` serves the API and the built site on port 8000 as a non-root user. Base images are pinned by digest and Python packages by hash (`backend/requirements.lock`). |
 
@@ -281,15 +281,19 @@ MIT, see [LICENSE](LICENSE). Built on:
 * **SAM 2.1** by Meta (Apache-2.0), through the
   [onnx-community](https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX) ONNX conversion.
 * **IS-Net** from [Dichotomous Image Segmentation](https://github.com/xuebinqin/DIS) by Xuebin Qin et al.
-  (Apache-2.0), fetched through [rembg](https://github.com/danielgatis/rembg) (MIT).
+  (Apache-2.0), fetched through [rembg](https://github.com/danielgatis/rembg) (MIT). Its training dataset (DIS5K)
+  is licensed for non-commercial use only, so check with the authors before using this commercially.
 * **build123d** (Apache-2.0) on **OCP** (Apache-2.0) for **Open CASCADE Technology** (LGPL-2.1 with exception,
   dynamically linked), plus **lib3mf** (BSD) for 3MF.
 * **OpenCV** (Apache-2.0), **ONNX Runtime** (MIT), **Shapely** (BSD), **NumPy** (BSD), **FastAPI** (MIT),
   **Pillow** (MIT-CMU).
-* **pillow-heif** (BSD-3) for iPhone photos. Its wheels bundle libheif and libde265 (LGPL-3) and the x265 encoder
-  (GPL-2). The app only decodes, and those libraries stay inside the wheels in the container image; none of their
-  code is in this repo. HEVC is patent-encumbered in some countries.
+* **pi-heif** (BSD-3 code, LGPL-3.0 wheels) for iPhone photos: the decode-only build of pillow-heif, so no GPL
+  x265 encoder gets pulled in. HEVC is patent-encumbered in some countries.
 * **React**, **three.js** and **Vite** (MIT), and the **Inter** font by Rasmus Andersson (SIL OFL 1.1, bundled in
   `frontend/public/fonts/`).
-* Bin geometry follows the [Gridfinity](https://gridfinity.xyz) spec by Zack Freedman. Some ideas borrowed from
+* Bin geometry follows the [Gridfinity](https://gridfinity.xyz) spec by Zack Freedman (MIT). Some ideas borrowed from
   [tracefinity](https://github.com/tracefinity/tracefinity) (MIT).
+
+No code in this repo is copyleft. Some libraries bundled in the Docker image are LGPL or GPL (OpenCascade, FFmpeg,
+GEOS, libheif, jbigkit, FreeImage). That's fine for building and running it yourself, but read
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before publishing a built image. It has the full audit.

@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 with __import__("contextlib").suppress(Exception):
-    from pillow_heif import register_heif_opener
+    from pi_heif import register_heif_opener
 
     register_heif_opener()
 
