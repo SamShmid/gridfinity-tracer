@@ -26,6 +26,9 @@ export function nextToolName(existing: { name: string }[]): string {
 export const isAutoTraced = (t: { source: string }) =>
   t.source.startsWith('auto') || t.source.startsWith('classical')
 
+/** What a new Find tools run may replace: auto-traced outlines the user hasn't touched since. */
+export const isReplaceable = (t: { source: string; edited?: boolean }) => isAutoTraced(t) && !t.edited
+
 /** Unique id for tools. crypto.randomUUID is missing on plain-http LAN origins, so fall back. */
 export function uid(): string {
   try {

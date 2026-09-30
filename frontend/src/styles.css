@@ -251,6 +251,26 @@ main > .panel {
 /* ---- tablet / phone: one column. Upload, Home and Library put the panel first (main.sidefirst);
    Paper, Trace and Design keep the picture on top, capped, with the panel and its sticky .cta below. */
 @media (max-width: 960px) {
+  /* The fixed-height header can't hold the step pills on a phone: let it grow to two rows (brand + name,
+     then the steps as one row that scrolls sideways) instead of overflowing under the page. */
+  header {
+    height: auto;
+    min-height: var(--l-header);
+    flex-wrap: wrap;
+    padding-top: var(--sp-2);
+    padding-bottom: var(--sp-2);
+    row-gap: var(--sp-2);
+  }
+  .steps {
+    flex: 1 0 100%;
+    flex-wrap: nowrap;
+    margin-left: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .steps button {
+    flex: none;
+  }
   main {
     grid-template-columns: 1fr;
     height: auto;

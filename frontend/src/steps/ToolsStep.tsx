@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, errMsg, Poly, ToolOutline } from '../api'
-import { area, toPath } from '../geom'
+import { area, centroid, pointInPoly, toPath } from '../geom'
 import type { Session, Tool, Update } from '../types'
 import { depthFor } from '../types'
 import { BusyOverlay, Tip, toast } from '../ui'
-import { isAutoTraced, nextToolName, numOr, sourceLabel, uid } from '../util'
+import { isReplaceable, nextToolName, numOr, sourceLabel, uid } from '../util'
 
 type SamPt = { x: number; y: number; label: number }
 type PointMode = 'add' | 'exclude'
@@ -100,8 +100,8 @@ export default function ToolsStep({ s, update }: { s: Session; update: Update })
     return t
   }
 
-  // Find tools / Simple contrast replace what an earlier run of either drew. Click traces and re-traces are
-  // the user's own work and stay. One run at a time: the buttons are disabled while busy, and this ref also
+  // Find tools / Simple contrast replace what an earlier run of either drew, unless the user has changed that
+  // tool since. Click traces, re-traces and edited tools are the user's own work and stay. One run at a time: the buttons are disabled while busy, and this ref also
   // covers the auto-run on landing racing a click.
   const detecting = useRef(false)
   async function detect(method: 'auto' | 'classical') {
@@ -121,17 +121,31 @@ export default function ToolsStep({ s, update }: { s: Session; update: Update })
           )
         return
       }
-      const kept = toolsRef.current.filter((t) => !isAutoTraced(t))
+      const kept = toolsRef.current.filter((t) => !isReplaceable(t))
       const replaced = toolsRef.current.length - kept.length
+      // a tool the user already traced or edited is found again: keep theirs, don't add a copy on top
+      const fresh = good.filter((o) => {
+        const [cx, cy] = centroid(o.polygon)
+        return !kept.some((t) => pointInPoly(t.raw, cx, cy))
+      })
       const made: Tool[] = []
-      for (const o of good) made.push(await makeTool(o, nextToolName([...kept, ...made])))
-      applyTools((cur) => [...cur.filter((t) => !isAutoTraced(t)), ...made])
+      for (const o of fresh) made.push(await makeTool(o, nextToolName([...kept, ...made])))
+      applyTools((cur) => [...cur.filter((t) => !isReplaceable(t)), ...made])
       if (sel && !kept.some((t) => t.id === sel)) {
         setSel(null)
         setSelV(null)
       }
       const n = `${made.length} tool${made.length === 1 ? '' : 's'}`
-      toast(replaced ? `Found ${n}, replacing the ${replaced} auto-traced before` : `Found ${n}`)
+      const same = good.length - fresh.length
+      toast(
+        [
+          made.length ? `Found ${n}` : 'No new tools',
+          replaced ? `replacing ${replaced} you hadn't changed` : '',
+          same ? `kept your ${same === 1 ? 'version' : 'versions'} of ${same} already traced` : '',
+        ]
+          .filter(Boolean)
+          .join(', '),
+      )
     } catch (e) {
       if (mounted.current) setErr(errMsg(e))
     } finally {
@@ -208,7 +222,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: Update })
   const offsetSeq = useRef<Record<string, number>>({})
   /** Returns true when the recomputed outline was applied (false if superseded, removed, or failed). */
   async function reoffset(t: Tool, patch: Partial<Tool>): Promise<boolean> {
-    const nt = { ...t, ...patch }
+    const nt = { ...t, ...patch, edited: true }
     const seq = (offsetSeq.current[t.id] = (offsetSeq.current[t.id] ?? 0) + 1)
     // optimistic: apply the option now, swap in the recomputed outline when it arrives
     setTools(toolsRef.current.map((x) => (x.id === t.id ? nt : x)))
@@ -237,7 +251,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: Update })
     }
   }
   const patchTool = (id: string, patch: Partial<Tool>) =>
-    setTools(toolsRef.current.map((x) => (x.id === id ? { ...x, ...patch } : x)))
+    setTools(toolsRef.current.map((x) => (x.id === id ? { ...x, ...patch, edited: true } : x)))
   const findTool = (id: string) => toolsRef.current.find((x) => x.id === id)
   function removeTool(id: string) {
     const cur = toolsRef.current

@@ -16,6 +16,7 @@ export interface Tool {
   id: string
   name: string
   source: string
+  edited?: boolean // the user changed it (name, outline, options, layout); Find tools keeps these
   raw: Poly // rectified-image mm, as traced
   offset: Poly // pocket outline after smoothing/clearance (from backend)
   // outline options

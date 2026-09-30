@@ -170,7 +170,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
     update({ tools: t })
   }
   const patch = (id: string, p: Partial<Tool>) =>
-    setTools(toolsRef.current.map((t) => (t.id === id ? { ...t, ...p } : t)))
+    setTools(toolsRef.current.map((t) => (t.id === id ? { ...t, ...p, edited: true } : t)))
 
   useEffect(() => {
     const up = () => setDrag(null)
@@ -208,11 +208,11 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
     .filter(({ poly, cuts }) => poly.some((p) => !inside(p)) || cuts.some((c) => c.some((p) => !inside(p))))
     .map((p) => p.t)
   const outsideIds = new Set(outside.map((t) => t.id))
-  // Longer than the biggest bin the server makes: no amount of dragging or Auto-arrange will fit it.
+  // Wider than the biggest bin the server makes both ways: no amount of dragging or Auto-arrange will fit it.
   const maxSpan = PITCH * MAX_GRID - 0.5 - 2 * wallKeep
   const tooBig = placed.filter(({ poly }) => {
     const b = bbox(poly)
-    return Math.min(b.w, b.h) > maxSpan || (b.w > maxSpan && b.h > maxSpan)
+    return Math.min(b.w, b.h) > maxSpan
   })
   const maxDepth = maxPocketDepth(bin)
   const tooDeep = s.tools.filter((t) => t.depth > maxDepth + 1e-6)
@@ -332,7 +332,11 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
         onDrag: (id, dx, dy) => {
           const st = dragStart.current
           if (!st) return
-          setTools(toolsRef.current.map((t) => (t.id === id ? { ...t, x: st.x + dx, y: st.y + dy } : t)))
+          setTools(
+            toolsRef.current.map((t) =>
+              t.id === id ? { ...t, x: st.x + dx, y: st.y + dy, edited: true } : t,
+            ),
+          )
         },
         onDragEnd: () => setDrag3d(false),
         onSelect: setSel, // empty space clears the selection, same as in the 2D layout

@@ -150,8 +150,21 @@ export default function App() {
     }
   }, [])
 
+  // A file dropped anywhere outside the Photo step's drop zone would make the browser open it and leave
+  // the app (losing unsaved edits). Swallow it; UploadStep adds its own window handler that uploads.
+  useEffect(() => {
+    const stop = (e: DragEvent) => e.preventDefault()
+    window.addEventListener('dragover', stop)
+    window.addEventListener('drop', stop)
+    return () => {
+      window.removeEventListener('dragover', stop)
+      window.removeEventListener('drop', stop)
+    }
+  }, [])
+
   // A different project: forget the last key (it belongs to the other project) and treat the step it
-  // opens on as the starting point, so opening does not fire an instant re-save of unchanged state.
+  // opens on as the starting point, so opening does not save instantly. The debounced autosave still
+  // writes once 3 s later, which also stores older projects in the current state format.
   // Declared before the autosave effect so it runs first in the same commit.
   useEffect(() => {
     lastSaved.current = ''
