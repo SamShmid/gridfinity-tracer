@@ -31,3 +31,10 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # The lock is compiled for Python 3.12 (pyproject: >=3.12,<3.13), so only take 3.12.x patches.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # Node only builds the frontend; move between LTS majors by hand.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
