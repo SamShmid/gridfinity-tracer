@@ -1,163 +1,295 @@
 # Gridfinity Tracer
 
-Take a top-down photo of tools lying on a sheet of paper, and get a Gridfinity bin
-with perfectly fitted pockets as STL, 3MF or STEP. Everything runs locally in one
-Docker container; photos never leave the machine.
+Lay your tools on a sheet of paper, snap a photo from above, and get a
+[Gridfinity](https://gridfinity.xyz) bin with a pocket cut to fit each tool. Download it as STL, 3MF or STEP
+and print it.
 
-## Run it
+Everything runs locally in one Docker container. No accounts, no cloud, and your photos never leave the machine.
+
+[![CI](https://github.com/SamShmid/gridfinity-tracer/actions/workflows/ci.yml/badge.svg)](https://github.com/SamShmid/gridfinity-tracer/actions/workflows/ci.yml)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+
+![Design screen: 2D layout on top, live 3D preview below](docs/images/04-design.jpg)
+
+## Quick start
+
+You need [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on Mac or Windows is fine). No GPU needed.
 
 ```bash
+git clone https://github.com/SamShmid/gridfinity-tracer.git
+cd gridfinity-tracer
 docker compose up --build
-# then open http://localhost:8080
 ```
 
-First start downloads about 330 MB of model weights (SAM 2.1 tiny and IS-Net) into
-the `models` volume. After that it works offline. Uploads, exports and the library database live in the
-`data` volume, so they survive rebuilds; `docker compose down -v` wipes them.
+Open **http://localhost:8080**.
 
-If the download fails (no internet) the container still starts: photo tracing falls back to the classical
-detector and `GET /api/health` reports `models_ready: false` until the weights exist (`docker compose restart`
-retries). Docker's healthcheck polls the same endpoint. The process runs as the unprivileged `tracer` user;
-the entrypoint fixes volume ownership on the way in.
+The first start downloads about 335 MB of AI model weights, so give it a few minutes. After that it works
+offline. Your projects live in a Docker volume and survive rebuilds (`docker compose down -v` wipes them).
+
+The image builds natively on x86_64 and arm64 (Apple Silicon included). The container is capped at 6 GB of RAM
+in `docker-compose.yml`.
+
+## How to use it
+
+### 1. Photo
+
+![Home screen](docs/images/01-home.jpg)
+
+Name the project and pick **Trace tools from a photo**, or **Regular Gridfinity bin** if you just want an empty
+bin. Upload a photo or take one with your phone's camera. JPEG, PNG, WebP, TIFF and iPhone HEIC all work. Pick
+the paper size you used (Letter, A4, A3, Tabloid, Legal, A5 or custom).
+
+**Getting a good photo:**
+
+* Shoot straight down from farther away and zoom in. Close shots make tall tools look bigger (see
+  [Accuracy](#accuracy)).
+* Get the whole sheet in frame with all four corners visible.
+* A darker, matte surface under the paper is easiest. Glossy benches work, just check the corners.
+* Keep tools from touching each other or hanging off the paper.
+
+### 2. Paper
+
+![Paper step: the four corners are detected automatically](docs/images/02-paper.jpg)
+
+The sheet is found automatically. Check that each handle sits right on a paper corner, since the corners set the
+scale. Drag them if not. A 3x zoom shows up while you drag, and arrow keys nudge a selected handle by 1 px
+(shift for 10).
+
+### 3. Trace
+
+![Trace step: each tool outlined in blue, the pocket with clearance in orange](docs/images/03-trace.jpg)
+
+Tools are found automatically when you land here. Blue is the traced outline, orange is the pocket after
+clearance. If something's missing, click the tool to trace just that one and click more spots to grow the
+outline (shift-click or right-click carves a spot out). Per tool you can set fit clearance, smoothing, straight
+edges, mirror symmetry and tool thickness, or edit the outline point by point.
+
+### 4. Design and export
+
+The 2D layout and the live 3D preview sit together (screenshot at the top). **Auto-arrange** straightens every
+tool and packs it into the smallest bin that fits. Drag pockets around in either view (or tab to one and use the
+arrow keys), rotate them, and add finger notches so you can get the tool back out. Pocket depth follows the tool
+thickness and how deep you want it to sit. You get a warning if a pocket is too deep for the bin (one click
+raises the bin), too shallow to hold the tool, or the tool is bigger than the largest bin (10 x 10 units).
+
+Pick the bin options (stacking lip, magnet or screw holes, solid or hollow body, dividers, scoop, label tab), then
+hit **Download STL**, **3MF** or **STEP**.
+
+### Library
+
+Every project saves itself as you go: the original photo (HEIC included), the traced tools, the layout, a 3D
+snapshot and every file you downloaded. Open a project from the home page or the **Library** to pick it back up,
+view old models in 3D, re-download them, rename or delete.
+
+Projects nobody opens for **90 days** are deleted automatically. Download anything you want to keep.
+
+## Who can reach it
+
+The app has no accounts and no password. With the default `docker-compose.yml` it listens on every network
+interface, so **anyone on the same Wi-Fi or LAN can open it, upload photos, see and download every project's
+photos and models, and delete projects**. That's on purpose: it's meant to be one shared library for a workshop
+you trust.
+
+* To keep it to this machine only, change the port line in `docker-compose.yml` to `"127.0.0.1:8080:8000"`.
+* Don't expose it to the internet. To share it beyond one LAN, put it behind something that handles login
+  (Tailscale, a reverse proxy with basic auth, etc.).
+
+The only outbound request the app ever makes is the one-time model download. The UI font is bundled.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Photo<br/>JPEG / PNG / HEIC] --> B[Find the sheet<br/>SAM 2 + edge scoring]
+    B --> C[Perspective correction<br/>sheet becomes a metric<br/>rectangle at 4 px/mm]
+    C --> D[Find tools<br/>IS-Net, or SAM 2 clicks]
+    D --> E[Zoom-in refinement<br/>re-run on a crop]
+    E --> F[Outline cleanup<br/>smooth, straighten,<br/>clearance offset]
+    F --> G[Layout<br/>auto-arrange + drag]
+    G --> H[CAD<br/>build123d / OpenCascade]
+    H --> I[STL / 3MF / STEP]
+```
+
+1. **Finding the paper** (`backend/app/paper.py`). SAM 2 is prompted to segment the sheet several ways. Each
+   candidate is scored on how rectangular it is, how bright, and how well its sides line up with real edges in
+   the photo, then each side snaps to the nearest strong straight line (Hough transform). This holds up on glossy
+   brushed-steel benches with glare, where the classic "biggest white quad" approach fails. If the models aren't
+   downloaded yet it falls back to that classic OpenCV detector.
+2. **Scale** (`paper.py`). A homography maps the four corners onto a rectangle the size of the sheet you picked,
+   at 4 px per mm. From here on everything is in millimetres.
+3. **Tracing** (`backend/app/segment.py`). "Find tools" runs IS-Net, a salient-object model, over the corrected
+   sheet and splits the result into one mask per tool. Clicking a tool runs SAM 2 with your clicks as prompts.
+   Every mask then gets a **zoom-in pass**: both models run again on a tight crop around the tool (3 to 5x more
+   pixels per mm), and the smoothest result that still agrees with the original wins.
+4. **Outline** (`backend/app/outline.py`). The mask becomes a polygon that's resampled and Gaussian-smoothed
+   (sigma 1 mm), so pixel wobble goes away but round tips stay round. Optional extras: snap near-straight edges
+   straight, mirror about the long axis (screwdrivers, wrenches), convex hull. Then it grows by the fit clearance
+   plus printer compensation (default 0.2 mm), and slots narrower than 3 mm (like between plier jaws) get bridged
+   so they don't print as fragile slivers.
+5. **Layout** (`frontend/src/steps/DesignStep.tsx`). Each tool is turned so its long side is level
+   (minimum-area rectangle), then packed in rows, lengthwise or across.
+6. **CAD** (`backend/app/gridfinity.py`). build123d on OpenCascade builds the bin (base feet, walls, stacking
+   lip, magnet or screw holes) and cuts each pocket and finger notch out of it. Pockets never cut below the solid
+   floor (7 mm), because the feet underneath are hollow.
+
+### Gridfinity dimensions
+
+42 mm grid pitch, 7 mm height units, 41.5 mm cell footprint. Foot profile 0.8 / 1.8 / 2.15 mm, stacking lip
+0.7 / 1.8 / 1.9 mm, corner radius 3.75 mm, magnets 6.5 x 2.4 mm, screws 3 x 6 mm, holes 8 mm in from the cell
+edge, wall 0.95 mm. All in `backend/app/gridfinity.py`.
+
+## Tech stack
+
+| Part | What |
+|---|---|
+| Backend | Python 3.12, FastAPI + uvicorn, OpenCV (paper detection, homography), ONNX Runtime on CPU, Shapely (polygon offsets), build123d on OpenCascade (CAD + export), Pillow + pillow-heif (image decoding), SQLite (library) |
+| Frontend | React 18, TypeScript, Vite, three.js (3D preview) |
+| Packaging | One Docker image: Node builds the frontend, then `python:3.12-slim` serves the API and the built site on port 8000 as a non-root user. Base images are pinned by digest and Python packages by hash (`backend/requirements.lock`). |
+
+### Models
+
+Both run on the CPU through ONNX Runtime. The weights are **not** in this repo. They download into the `models`
+volume on first start and get checked before use.
+
+| Model | Used for | Size | Source | License |
+|---|---|---|---|---|
+| **SAM 2.1 Hiera-Tiny** (Meta) | Finding the paper, click-to-trace, refinement | ~155 MB | ONNX conversion [onnx-community/sam2.1-hiera-tiny-ONNX](https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX), pinned to one revision, sha256-checked | Apache-2.0 ([facebookresearch/sam2](https://github.com/facebookresearch/sam2)) |
+| **IS-Net** `isnet-general-use` | "Find tools" auto-detect, refinement | ~179 MB | [DIS](https://github.com/xuebinqin/DIS) weights, fetched and md5-checked by [rembg](https://github.com/danielgatis/rembg) | Apache-2.0 (weights), MIT (rembg) |
+
+### Speed
+
+On an Apple M5 (10 cores), CPU only: paper detection under 1 s, IS-Net about 3 s, SAM about 1 s to embed a photo
+and then about 50 ms per click, bin generation about 1 s.
+
+## Configuration
+
+Set these under `environment:` in `docker-compose.yml`. The defaults are fine for most people.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `GT_RETENTION_DAYS` | 90 | Delete projects not opened or changed for this many days |
+| `GT_BLANK_DAYS` | 1 | Delete empty projects (no photo, no layout) after this many days |
+| `GT_ORPHAN_DAYS` | 7 | Delete leftover working images after this many days |
+| `GT_MAX_UPLOAD_MB` | 50 | Largest photo upload |
+| `GT_MAX_UPLOAD_SIDE` | 3000 | Photos get downscaled to this many px on the long side |
+| `GT_CUSTOM_PAPER_MAX_MM` | 1000 | Largest custom sheet side |
+| `GT_PX_PER_MM` | 4 | Resolution of the corrected sheet image |
+| `GT_RECTIFY_MARGIN_MM` | 25 | Margin kept around the sheet after correction |
+| `GT_INFER_TIMEOUT_S` | 60 | Stop waiting on a model run after this long (504) |
+| `GT_INFER_MAX_PENDING` | 6 | Model runs allowed in flight before the server answers "busy" (503) |
+| `GT_CAD_TIMEOUT_S` | 120 | Kill a stuck CAD job after this long (504) |
+| `GT_REMBG_MODEL` | isnet-general-use | rembg model used for auto-detect |
+| `GT_SKIP_MODEL_DOWNLOAD` | 0 | Set to 1 to start without downloading weights (classic detector only) |
+| `GT_USER` | tracer | User the server runs as inside the container |
 
 ### Limits
 
-One container serves every browser on the LAN, so requests are fenced in:
-
-* Uploads: 50 MB per file (`GT_MAX_UPLOAD_MB`), 100 megapixels (checked from the header before decoding),
-  then downscaled to 3000 px on the long side. Snapshots 3 MB, JSON bodies (state, generate) 2 MB.
-* Every numeric field is bounded to the UI's range (schemas.py); every id must be 12 hex chars. Bad input gets
-  a 400 / 413 / 422 with a plain message, never a stack trace.
-* Model inference runs in a 2-thread pool with a 60 s timeout; CAD runs in a 2-process pool with a 120 s
-  timeout (the pool is recycled if OpenCascade gets stuck). Timeouts answer 504.
-* Generated models are cached by request hash (32 entries), so re-previewing the same design is instant.
+One container serves everyone on the LAN, so requests are fenced in. Uploads max out at 50 MB and 100
+megapixels (checked from the file header before decoding). JSON bodies are capped at 2 MB and snapshots at 3 MB,
+counted while reading, so a chunked upload can't sneak past. Every number is bounded to the UI's range, every
+coordinate has to be finite, and every id has to be 12 hex characters. Bad input gets a plain 400 / 413 / 422,
+never a stack trace. Model runs use a 2-thread pool. CAD uses a 2-process pool that gets killed and recycled if
+OpenCascade hangs. Generated models are cached (32 entries, 128 MB max), so re-previewing the same design is
+instant.
 
 ### Retention
 
-The library is not an archive. A sweep runs at startup and every 24 h and deletes:
+A sweep runs at startup and every 24 hours. It deletes projects untouched for 90 days, blank projects after a day,
+and orphaned working images after 7 days, and logs everything it removes. Opening a project restarts its clock.
+Each project in `GET /api/library` has an `expires_at`.
 
-* projects not opened or changed for **90 days** (`GT_RETENTION_DAYS`); each project in `GET /api/library`
-  carries `expires_at`, and opening a project calls `PUT /api/library/{id}/touch` to restart the clock,
-* blank projects (no photo, no state, no exports, no snapshot) older than 1 day (`GT_BLANK_DAYS`),
-* orphan working images left over from older versions after 7 days (`GT_ORPHAN_DAYS`).
+## Accuracy
 
-Everything removed is logged. Download the STL / STEP of anything you want to keep.
-
-## Flow
-
-The app opens on a **home page**: name the project, then pick **Trace tools from a photo** or **Regular
-Gridfinity bin**. Recent projects with 3D snapshots sit down the side.
-
-Photo tracing (steps are named Photo, Paper, Trace, Design in the app):
-1. **Photo**: upload or take a photo (JPEG, PNG, WebP, TIFF or iPhone HEIC) and pick the paper size (Letter, A4, A3, Tabloid, Legal, A5 or custom).
-2. **Paper corners**: the sheet is auto-detected (SAM 2 prompted for "the sheet", several hypotheses scored by
-   rectangularity, brightness and edge support, then each side snapped to the nearest strong straight edge);
-   drag the four corners if needed. The photo is perspective-corrected so the paper is a known metric rectangle (4 px/mm).
-3. **Trace tools**: "Find tools" runs IS-Net over the sheet, or click a tool to trace it with SAM 2. Every mask then gets a
-   zoom-in refinement pass: SAM 2 and IS-Net are re-run on a crop around the tool (3-5x more pixels per mm) and the
-   smoothest candidate that still agrees with the original wins ("refine" button re-runs it after hand edits). Per tool: fit clearance,
-   printer compensation (0.2 mm default), Gaussian smoothing, straighten edges, mirror-symmetric, convex hull,
-   tool thickness; edit the outline vertex by vertex.
-4. **Design and export**: 2D layout and live 3D preview side by side. Auto-arrange straightens every tool along its long
-   axis and packs it (lengthwise or upright); drag/rotate tools, add finger holes. Pocket depth follows the tool
-   thickness and "how it sits" (fully sunk / 3/4 / half / custom), with checks for too deep (one-click raise the
-   bin), too shallow, or deeper than the tool. Export STL, 3MF or STEP; a 3D snapshot and the layout are saved.
-
-Plain bin: the same Design screen without pockets (hollow bin with dividers, scoop, label tab, lip, holes).
-
-**Library**: every upload is kept as the original file (HEIC included) with a thumbnail, every download with its
-snapshot and settings. Download originals or old models, view old STLs in 3D, rename, delete, or Open to continue.
-
-## Styling
-
-One file, `frontend/src/theme.ts`, defines every colour (light + dark), font, size, spacing, radius and shadow.
-It writes them to `:root` as CSS variables at startup; `styles.css` and the components only reference those
-variables, and TypeScript code (the three.js viewer) imports `theme` directly. Change a token there and it changes
-everywhere.
-
-## Stack
-
-* Backend: Python 3.12, FastAPI, OpenCV (paper detection, homography), ONNX Runtime
-  (SAM 2.1 hiera-tiny, IS-Net via rembg), Shapely (offsets), build123d / OpenCascade (bin CAD + export).
-* Frontend: React + Vite + TypeScript, three.js preview. Built into the backend image.
-* CPU only. On a 10-core laptop: paper detect < 1 s, IS-Net ~3 s, SAM embed ~1 s then ~50 ms per click, bin generation ~1 s.
+* **Paper size and corners set the scale.** Pick the wrong sheet and everything scales with it. Always glance at
+  the corners in step 2.
+* **Parallax.** A tool 20 mm tall shot from 50 cm away traces about 4% oversize. Shoot from farther away and zoom
+  in. (The `/api/polygon/offset` endpoint can correct for it with `tool_height_mm` and `camera_distance_mm`, but
+  that isn't in the UI yet.)
+* **Clearance.** 0.3 to 0.5 mm gives a snug fit on a well-tuned printer, 1 mm or more to drop tools in easily.
+  The 0.2 mm printer compensation goes on top to absorb over-extrusion and elephant foot.
+* **Silver tools on white paper** are hard for plain contrast. Use "Find tools" or click-to-trace instead of
+  "Simple contrast".
+* The paper detector was tuned on the 10 iPhone photos in `gridfinity-tracer-photos/` (glossy brushed-steel
+  bench) and gets all 10 right. Overlays are in [`docs/eval-2026-09-22/`](docs/eval-2026-09-22/) and per-tool
+  traces in [`docs/trace-review-2026-09-22/`](docs/trace-review-2026-09-22/).
 
 ## Development
 
+Run the backend and frontend separately with hot reload:
+
 ```bash
-cd backend && uv venv --python 3.12 && uv pip install -e ".[dev]"
-uv pip compile pyproject.toml --universal --python-version 3.12 -o requirements.lock   # after changing dependencies
-U2NET_HOME=../models/u2net .venv/bin/python scripts/download_models.py
-U2NET_HOME=../models/u2net .venv/bin/uvicorn app.main:app --reload --port 8000
-cd ../frontend && npm install && npm run dev      # http://localhost:5173, proxies /api to :8000
-cd ../backend && .venv/bin/python -m pytest       # synthetic end-to-end tests + real-photo regression
-.venv/bin/python scripts/batch_eval.py ../gridfinity-tracer-photos /tmp/eval   # overlays for every photo
+# backend (Python 3.12 + uv: https://docs.astral.sh/uv/)
+cd backend
+uv venv --python 3.12
+uv pip install --require-hashes -r requirements.lock
+uv pip install -e ".[dev]"
+.venv/bin/python scripts/download_models.py          # into ../models
+.venv/bin/python -m uvicorn app.main:app --reload --port 8000
+
+# frontend, in another terminal
+cd frontend
+npm install
+npm run dev                                          # http://localhost:5173, proxies /api to :8000
 ```
 
-`backend/tests/synth.py` renders a synthetic photo (Letter sheet under perspective on a dark
-bench with a known tool) that the tests trace and compare against ground truth. `tests/test_api.py` drives the
-HTTP layer (id validation, size limits, bounds, retention sweep) against a temp data dir set up in `conftest.py`.
+The same checks CI runs:
 
-### Dependencies and ops
+```bash
+cd backend  && .venv/bin/ruff format --check . && .venv/bin/ruff check . && .venv/bin/python -m pytest
+cd frontend && npm run format:check && npx tsc --noEmit && npm run build
+```
 
-* `backend/requirements.lock` pins every Python package; the Dockerfile installs from it, so rebuilds are
-  reproducible. Regenerate it with the `uv pip compile` line above whenever `pyproject.toml` changes.
-* uvicorn runs with `--workers 1` on purpose (see `docker/entrypoint.sh`): the caches and worker pools live in
-  the process. Do not raise it; concurrency comes from the pools.
-* `GET /api/health` returns `{"ok", "sam", "models_ready", "version"}`.
-* Working images live with their project under `data/library/<project_id>/` (`upload_*.png`, `rect_*.png/json`)
-  and are deleted with it. Files from older versions in the `data/` root are migrated on start where possible
-  and swept after 7 days otherwise.
+* `backend/tests/synth.py` renders a synthetic photo (a Letter sheet under perspective with a known tool) that the
+  pipeline tests trace and compare against ground truth. `tests/test_api.py` covers the HTTP layer: id validation,
+  size limits, bounds, retention and concurrency edge cases. `tests/test_real_photos.py` runs the paper detector
+  on the 10 real photos. Tests that need model weights skip when they're missing.
+* `backend/scripts/batch_eval.py <photos> <out>` draws corner and outline overlays for a folder of photos.
+* After changing Python dependencies, regenerate the lock:
+  `uv pip compile pyproject.toml --universal --python-version 3.12 --generate-hashes -o requirements.lock`.
+* uvicorn runs with **one worker on purpose** (see `docker/entrypoint.sh`): the caches and worker pools live in
+  the process, and concurrency comes from the pools.
+* `frontend/src/theme.ts` holds every colour (light and dark), font, size and spacing and writes them to `:root`
+  as CSS variables. Change a token there and it changes everywhere.
+* `three` is pinned to an exact version because the viewer patches OrbitControls internals.
 
-## Accuracy notes
-
-* Glossy benches are the hard case: reflections of the sheet and glare are as bright as the paper.
-  The detector was tuned on 10 iPhone photos on a brushed-steel bench (`gridfinity-tracer-photos/`) and gets
-  all 10; a matte dark surface is still easier. Always glance at the corners in step 2.
-
-* Paper size and corner placement set the scale. A wrong sheet size scales everything.
-* Parallax: a tool 20 mm tall photographed from 50 cm is traced ~4 % oversize. Shoot from far and
-  zoom in. The `/api/polygon/offset` endpoint accepts `tool_height_mm` + `camera_distance_mm` to
-  compensate (not yet exposed in the UI).
-* Silver or light tools on white paper: use the AI auto-detect or SAM, not the dark-on-white tier.
-* Clearance 0.3–0.5 mm gives a snug fit on a well-tuned printer; 1 mm or more to drop in easily. Printer compensation
-  (default 0.2 mm) is added on top to absorb over-extrusion / elephant foot.
-* Gap bridging (default 1.5 mm radius) fills slots narrower than 3 mm inside a pocket (between open plier jaws,
-  between hex keys) that would otherwise print as fragile slivers of wall.
-* Outline realism: the mask outline is resampled and Gaussian-smoothed (sigma 1 mm) so pixel wobble disappears while
-  round tips stay round; optional edge straightening snaps near-axis edges, and mirror-symmetry unions the shape
-  with its reflection about the long axis (screwdrivers, wrenches).
-
-## Gridfinity dimensions used
-
-42 mm pitch, 7 mm height units, 41.5 mm cell footprint. Foot profile 0.8 / 1.8 / 2.15 mm,
-stacking lip 0.7 / 1.8 / 1.9 mm, corner radius 3.75 mm, magnet 6.5 × 2.4 mm, screw 3 × 6 mm,
-holes 8 mm in from the cell edge, wall 0.95 mm. See `backend/app/gridfinity.py`.
-
-## Layout
+### Layout
 
 ```
-backend/app/paper.py       paper quad detection + homography
-backend/app/segment.py     classical / IS-Net / SAM 2 masks
-backend/app/outline.py     mask -> polygon, simplify, clearance offset
-backend/app/gridfinity.py  bin CAD (build123d) + STL/3MF/STEP export
-backend/app/main.py        FastAPI routes, serves the built frontend
-backend/app/library.py     SQLite + on-disk project library (originals, images, state, exports, retention sweep)
-backend/app/schemas.py     request models with the UI's bounds
-backend/tests/test_api.py  HTTP-level tests (ids, limits, bounds, retention)
-frontend/src/LibraryView.tsx, StlViewer.tsx, project.ts (open/snapshot)
-docs/eval-2026-09-22/      corner + outline overlays for the 10 test photos
-docs/trace-review-2026-09-22/  per-tool crops: IS-Net (red), refined (blue), final pocket (green)
-frontend/src/steps/        Upload, Paper, Tools, Design (layout + live 3D + export)
-frontend/src/HomeView.tsx  landing page with project choice + recent library
-docker/entrypoint.sh       downloads models on first start, runs uvicorn
+backend/app/
+  main.py        FastAPI routes, request limits, worker pools, serves the built frontend
+  paper.py       paper detection + homography
+  segment.py     classic / IS-Net / SAM 2 masks, zoom-in refinement
+  outline.py     mask -> polygon, smoothing, clearance offset
+  gridfinity.py  bin CAD (build123d) + STL / 3MF / STEP export
+  library.py     SQLite + on-disk project library, retention sweep
+  schemas.py     request models with the UI's bounds
+  imageio.py     image decoding (HEIC, 16-bit, EXIF rotation)
+backend/scripts/ model download, eval overlays
+backend/tests/   pytest suite
+frontend/src/
+  HomeView.tsx, LibraryView.tsx
+  steps/         UploadStep, PaperStep, ToolsStep, DesignStep
+  StlViewer.tsx  three.js viewer (orbit, pan, zoom to cursor, drag pockets)
+  theme.ts       design tokens
+docker/entrypoint.sh   downloads models on first start, drops to the app user, runs uvicorn
 ```
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Built on:
 
-Model weights are downloaded at first start, not shipped in this repo: [SAM 2.1](https://github.com/facebookresearch/sam2)
-hiera-tiny (Apache-2.0, Meta) and [IS-Net](https://github.com/xuebinqin/DIS) via [rembg](https://github.com/danielgatis/rembg)
-(Apache-2.0 / MIT). Bin geometry follows the [Gridfinity](https://gridfinity.xyz) spec by Zack Freedman. Some ideas
-borrowed from [tracefinity](https://github.com/tracefinity/tracefinity) (MIT).
+* **SAM 2.1** by Meta (Apache-2.0), through the
+  [onnx-community](https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX) ONNX conversion.
+* **IS-Net** from [Dichotomous Image Segmentation](https://github.com/xuebinqin/DIS) by Xuebin Qin et al.
+  (Apache-2.0), fetched through [rembg](https://github.com/danielgatis/rembg) (MIT).
+* **build123d** (Apache-2.0) on **OCP** (Apache-2.0) for **Open CASCADE Technology** (LGPL-2.1 with exception,
+  dynamically linked), plus **lib3mf** (BSD) for 3MF.
+* **OpenCV** (Apache-2.0), **ONNX Runtime** (MIT), **Shapely** (BSD), **NumPy** (BSD), **FastAPI** (MIT),
+  **Pillow** (MIT-CMU).
+* **pillow-heif** (BSD-3) for iPhone photos. Its wheels bundle libheif and libde265 (LGPL-3) and the x265 encoder
+  (GPL-2). The app only decodes, and those libraries stay inside the wheels in the container image; none of their
+  code is in this repo. HEVC is patent-encumbered in some countries.
+* **React**, **three.js** and **Vite** (MIT), and the **Inter** font by Rasmus Andersson (SIL OFL 1.1, bundled in
+  `frontend/public/fonts/`).
+* Bin geometry follows the [Gridfinity](https://gridfinity.xyz) spec by Zack Freedman. Some ideas borrowed from
+  [tracefinity](https://github.com/tracefinity/tracefinity) (MIT).
