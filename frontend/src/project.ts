@@ -6,9 +6,23 @@ import { uid } from './util'
 
 /** Everything needed to reopen a project later from the Library. */
 export function snapshot(s: Session) {
-  const { view, step, upload, corners, paper, customW, customH, orientation, rect, tools, bin, projectName } =
-    s
-  return { view, step, upload, corners, paper, customW, customH, orientation, rect, tools, bin, projectName }
+  const { view, step, upload, corners, paper, customW, customH, orientation } = s
+  const { rect, rectKey, tools, bin, projectName } = s
+  return {
+    view,
+    step,
+    upload,
+    corners,
+    paper,
+    customW,
+    customH,
+    orientation,
+    rect,
+    rectKey,
+    tools,
+    bin,
+    projectName,
+  }
 }
 
 /** Restore a saved project into the session (fills defaults for fields added since it was saved). */
@@ -78,6 +92,7 @@ export async function openProject(id: string, update: (p: Partial<Session>) => v
     customH: st.customH ?? 279.4,
     orientation: st.orientation ?? 'auto',
     rect: st.rect,
+    rectKey: typeof st.rectKey === 'string' ? st.rectKey : undefined,
     tools,
     bin: st.bin ?? defaultBin,
     step: tools.length ? 3 : st.rect ? 2 : 1,

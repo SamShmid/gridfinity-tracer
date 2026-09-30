@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react'
 import { api, errMsg, Poly } from '../api'
 import type { Session } from '../types'
-import { BusyOverlay } from '../ui'
+import { rectKeyOf } from '../types'
+import { BusyOverlay, toast } from '../ui'
 import { paperName } from '../util'
 
 const CORNER_NAMES = ['Top-left corner', 'Top-right corner', 'Bottom-right corner', 'Bottom-left corner']
@@ -47,7 +48,22 @@ export default function PaperStep({ s, update }: { s: Session; update: (p: Parti
     const [x, y] = corners[i]
     setCorner(i, [Math.max(0, Math.min(up.width, x + v[0])), Math.max(0, Math.min(up.height, y + v[1]))])
   }
+  // Nothing changed since the photo was last straightened: the traced tools still fit, so just move on.
+  const rectKey = rectKeyOf({ ...s, corners })
+  const unchanged = !!s.rect && s.rectKey === rectKey
   async function rectify() {
+    if (unchanged) {
+      update({ step: 2 })
+      return
+    }
+    const n = s.tools.length
+    if (
+      n > 0 &&
+      !confirm(
+        `Straightening the photo again clears the ${n} traced tool${n === 1 ? '' : 's'}, since their outlines were drawn on the old version. Continue?`,
+      )
+    )
+      return
     setBusy(true)
     setErr('')
     try {
@@ -59,7 +75,8 @@ export default function PaperStep({ s, update }: { s: Session; update: (p: Parti
         custom_w_mm: s.paper === 'custom' ? s.customW : undefined,
         custom_h_mm: s.paper === 'custom' ? s.customH : undefined,
       })
-      update({ rect, tools: [], step: 2 })
+      update({ rect, rectKey, tools: [], step: 2 })
+      if (n > 0) toast(`Cleared ${n} traced tool${n === 1 ? '' : 's'}`, 'info')
       api.samWarm(rect.rect_id).catch(() => {})
     } catch (e) {
       setErr(errMsg(e))
@@ -86,6 +103,7 @@ export default function PaperStep({ s, update }: { s: Session; update: (p: Parti
           style={{ touchAction: 'none', width: '100%', height: '100%' }}
           onPointerMove={move}
           onPointerUp={() => setDrag(null)}
+          onPointerCancel={() => setDrag(null)}
           onPointerLeave={() => setDrag(null)}
         >
           <image href={imgSrc} width={up.width} height={up.height} />
@@ -217,7 +235,13 @@ export default function PaperStep({ s, update }: { s: Session; update: (p: Parti
           <button
             className="primary"
             disabled={busy}
-            title="Straightens the photo using these four corners, then moves on to tracing"
+            title={
+              unchanged
+                ? 'Nothing changed, so this just goes on to tracing'
+                : s.tools.length
+                  ? 'Straightens the photo again with these corners. This clears the traced tools, so you get asked first'
+                  : 'Straightens the photo using these four corners, then moves on to tracing'
+            }
             onClick={rectify}
           >
             {busy ? (

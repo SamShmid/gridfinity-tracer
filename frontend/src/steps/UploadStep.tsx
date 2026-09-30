@@ -1,37 +1,74 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, errMsg } from '../api'
+import { api, errMsg, MAX_UPLOAD_MB } from '../api'
 import type { Session } from '../types'
 import { BusyOverlay } from '../ui'
 import { numOr, paperName } from '../util'
 
 const ACCEPT = 'image/*,.heic,.heif,.HEIC,.HEIF'
+type Sizes = Record<string, { w_mm: number; h_mm: number }>
+/** Same list the server ships (paper.py), used when it cannot be reached so the Sheet menu is never empty. */
+const FALLBACK_SIZES: Sizes = {
+  letter: { w_mm: 215.9, h_mm: 279.4 },
+  legal: { w_mm: 215.9, h_mm: 355.6 },
+  tabloid: { w_mm: 279.4, h_mm: 431.8 },
+  a3: { w_mm: 297, h_mm: 420 },
+  a4: { w_mm: 210, h_mm: 297 },
+  a5: { w_mm: 148, h_mm: 210 },
+}
 
 export default function UploadStep({ s, update }: { s: Session; update: (p: Partial<Session>) => void }) {
-  const [sizes, setSizes] = useState<Record<string, { w_mm: number; h_mm: number }>>({})
+  const [sizes, setSizes] = useState<Sizes>(FALLBACK_SIZES)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false) // read by drop handlers so a second drop during an upload is ignored
   const [err, setErr] = useState('')
   const [over, setOver] = useState(false)
   const pickRef = useRef<HTMLInputElement>(null) // photo library / file picker (no capture)
   const cameraRef = useRef<HTMLInputElement>(null) // rear camera on phones; desktops fall back to the picker
+  const sRef = useRef(s)
+  sRef.current = s
 
   useEffect(() => {
     api
       .paperSizes()
       .then(setSizes)
-      .catch(() => {})
+      .catch((e) => setErr(`Could not reach the server for the paper list: ${errMsg(e)}`))
   }, [])
+
+  // A photo dropped anywhere on the page (the panel, the header, the busy overlay) would otherwise make
+  // the browser open the file and leave the app. Catch it at the window and treat it like the drop zone.
+  useEffect(() => {
+    const over = (e: DragEvent) => e.preventDefault()
+    const drop = (e: DragEvent) => {
+      e.preventDefault()
+      setOver(false)
+      handle(e.dataTransfer?.files[0])
+    }
+    window.addEventListener('dragover', over)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('drop', drop)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handle(file: File | undefined, input?: HTMLInputElement | null) {
     if (input) input.value = '' // so picking the same file again (or after a failure) fires onChange
-    if (!file) return
+    if (!file || busyRef.current) return
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      setErr(`That photo is ${(file.size / 1e6).toFixed(0)} MB. The limit is ${MAX_UPLOAD_MB} MB.`)
+      return
+    }
+    busyRef.current = true
     setBusy(true)
     setErr('')
     try {
-      const up = await api.upload(file, s.paper, s.customW, s.customH, s.projectName)
+      const cur = sRef.current
+      const up = await api.upload(file, cur.paper, cur.customW, cur.customH, cur.projectName)
       update({
         upload: up,
         corners: up.corners,
         rect: undefined,
+        rectKey: undefined,
         tools: [],
         step: 1,
         projectId: up.project_id,
@@ -39,6 +76,7 @@ export default function UploadStep({ s, update }: { s: Session; update: (p: Part
     } catch (e) {
       setErr(errMsg(e))
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
@@ -55,6 +93,7 @@ export default function UploadStep({ s, update }: { s: Session; update: (p: Part
           onDragLeave={() => setOver(false)}
           onDrop={(e) => {
             e.preventDefault()
+            e.stopPropagation() // the window handler would upload it a second time
             setOver(false)
             handle(e.dataTransfer.files[0])
           }}
@@ -97,8 +136,8 @@ export default function UploadStep({ s, update }: { s: Session; update: (p: Part
           />
           {err && <div className="status err">{err}</div>}
           <p className="hint">
-            JPEG, PNG, HEIC (iPhone), WebP, TIFF. The photo stays on this machine. Nothing is sent to the
-            internet.
+            JPEG, PNG, HEIC (iPhone), WebP, TIFF, up to {MAX_UPLOAD_MB} MB. The photo stays on this machine.
+            Nothing is sent to the internet.
           </p>
         </div>
         {busy && <BusyOverlay text="Reading the photo and looking for the sheet…" block />}
@@ -160,10 +199,10 @@ export default function UploadStep({ s, update }: { s: Session; update: (p: Part
                 type="number"
                 step="0.1"
                 min="50"
-                max="2000"
-                title="Short side of the sheet in millimetres"
+                max="1000"
+                title="Short side of the sheet in millimetres, 50 to 1000"
                 value={s.customW}
-                onChange={(e) => update({ customW: numOr(e.target.value, s.customW) })}
+                onChange={(e) => update({ customW: numOr(e.target.value, s.customW, 50, 1000) })}
               />
             </label>
             <label className="row">
@@ -172,10 +211,10 @@ export default function UploadStep({ s, update }: { s: Session; update: (p: Part
                 type="number"
                 step="0.1"
                 min="50"
-                max="2000"
-                title="Long side of the sheet in millimetres"
+                max="1000"
+                title="Long side of the sheet in millimetres, 50 to 1000"
                 value={s.customH}
-                onChange={(e) => update({ customH: numOr(e.target.value, s.customH) })}
+                onChange={(e) => update({ customH: numOr(e.target.value, s.customH, 50, 1000) })}
               />
             </label>
           </>

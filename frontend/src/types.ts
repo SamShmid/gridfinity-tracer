@@ -54,9 +54,19 @@ export interface Session {
   customH: number
   orientation: 'auto' | 'landscape' | 'portrait'
   rect?: RectifyResponse
+  /** What `rect` was made from (corners, paper, orientation), so "Looks right" can skip a no-op re-straighten. */
+  rectKey?: string
   tools: Tool[]
   bin: BinIn
 }
+
+/** Session patch, or a function of the latest session for changes that must land after an await
+ *  (a detection that finishes after the user has moved on, say). */
+export type Update = (p: Partial<Session> | ((prev: Session) => Partial<Session>)) => void
+
+/** The inputs that decide the straightened photo. Same key, same rect. */
+export const rectKeyOf = (s: Pick<Session, 'corners' | 'paper' | 'customW' | 'customH' | 'orientation'>) =>
+  JSON.stringify({ c: s.corners, p: s.paper, w: s.customW, h: s.customH, o: s.orientation })
 
 export const defaultBin: BinIn = {
   grid_x: 2,
@@ -95,6 +105,10 @@ export const TRACE_STEP_HINTS = [
 ]
 
 export const MIN_POCKET_FLOOR = 7.0 // keep in sync with backend gridfinity.MIN_POCKET_FLOOR (top of the solid floor)
+// Bin bounds the server enforces (backend schemas.py BinIn). Anything past these is a 422, so clamp here first.
+export const MAX_GRID = 10
+export const MAX_HEIGHT_UNITS = 20
+export const PITCH = 42
 
 export function depthFor(t: Pick<Tool, 'thickness' | 'sit' | 'depth'>): number {
   switch (t.sit) {

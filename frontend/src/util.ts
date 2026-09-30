@@ -1,11 +1,30 @@
 import type { LibraryProject } from './api'
 
-/** Parse a number input; keep `prev` when the box is empty or not a number (so clearing a field never sends NaN). */
-export function numOr(v: string, prev: number): number {
+/** Parse a number input; keep `prev` when the box is empty or not a number (so clearing a field never sends NaN).
+ *  With `min`/`max` the value is clamped, so typing 0 or 999 into a bounded field lands on the bound instead
+ *  of a 422 from the server. */
+export function numOr(v: string, prev: number, min = -Infinity, max = Infinity): number {
   if (v.trim() === '') return prev
   const n = Number(v)
-  return Number.isFinite(n) ? n : prev
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : prev
 }
+
+/** Wrap an angle into -180..180 so a slider with that range always shows it. */
+export const normDeg = (deg: number) => ((((deg + 180) % 360) + 360) % 360) - 180
+
+/** "Tool 3" for a new tool: one more than the highest numbered tool so far, so names never repeat. */
+export function nextToolName(existing: { name: string }[]): string {
+  let n = 0
+  for (const t of existing) {
+    const m = /^Tool (\d+)$/.exec(t.name.trim())
+    if (m) n = Math.max(n, Number(m[1]))
+  }
+  return `Tool ${Math.max(n, existing.length) + 1}`
+}
+
+/** Outlines that came from Find tools / Simple contrast (as opposed to a click trace or a re-trace). */
+export const isAutoTraced = (t: { source: string }) =>
+  t.source.startsWith('auto') || t.source.startsWith('classical')
 
 /** Unique id for tools. crypto.randomUUID is missing on plain-http LAN origins, so fall back. */
 export function uid(): string {

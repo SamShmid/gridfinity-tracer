@@ -26,12 +26,10 @@ export interface LibraryProject {
   name: string
   paper: string
   original_filename: string
-  original_ext: string
   original_size: number
   image_id: string
   width: number
   height: number
-  notes: string
   exports: LibraryExport[]
   has_state: boolean
   has_snapshot: boolean
@@ -105,12 +103,15 @@ export const isAbort = (e: unknown) => e instanceof DOMException && e.name === '
 
 type Ctx = 'upload' | 'generate' | 'generic'
 
+/** Server upload cap; keep in sync with backend GT_MAX_UPLOAD_MB (default 50). */
+export const MAX_UPLOAD_MB = 50
+
 function friendly(status: number, detail: string, ctx: Ctx): string {
   const d = detail.trim()
   const low = d.toLowerCase()
   if (status === 413)
     return ctx === 'upload'
-      ? 'That photo is too big. Try one under 40 MB.'
+      ? `That photo is too big. The limit is ${MAX_UPLOAD_MB} MB.`
       : 'That is too much data to send. Try a simpler design.'
   if (status === 415 || (status === 400 && (low.includes('decode') || low.includes('image')))) {
     return 'That file does not look like a photo we can read. Try a JPEG, PNG, HEIC or WebP.'
@@ -124,7 +125,10 @@ function friendly(status: number, detail: string, ctx: Ctx): string {
     return d
       ? `Some values are out of range: ${d}`
       : 'Some values are out of range. Check the numbers and try again.'
-  if (status === 429) return 'The server is busy right now. Wait a moment and try again.'
+  // 429: rate limited. 503: the inference pool is saturated or the CAD pool is being recycled; the server's
+  // own text says which, so show it when there is one.
+  if (status === 429 || status === 503)
+    return d || 'The server is busy right now. Wait a moment and try again.'
   if (status >= 500)
     return ctx === 'generate'
       ? d
@@ -187,7 +191,21 @@ async function j<T>(url: string, body?: unknown, method = 'POST', signal?: Abort
     body: body ? JSON.stringify(body) : undefined,
     signal,
   })
-  return r.json()
+  return parseJson<T>(r)
+}
+
+/** A 200 that is not JSON (a proxy's HTML page, say) becomes a plain ApiError instead of "Unexpected token <". */
+async function parseJson<T>(r: Response): Promise<T> {
+  const text = await r.text()
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new ApiError(
+      'The server sent something that is not a reply from this app. Check the address and try again.',
+      r.status,
+      text.slice(0, 200),
+    )
+  }
 }
 
 export const api = {
@@ -202,7 +220,7 @@ export const api = {
       fd.append('custom_h_mm', String(customH))
     }
     const r = await req('/api/upload', { method: 'POST', body: fd }, 'upload')
-    return (await r.json()) as UploadResponse
+    return parseJson<UploadResponse>(r)
   },
   rectify: (body: {
     image_id: string

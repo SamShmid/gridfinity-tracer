@@ -39,11 +39,12 @@ export default function HomeView({ update }: { update: (p: Partial<Session>) => 
   const [err, setErr] = useState('')
   const [name, setName] = useState('')
   const [opening, setOpening] = useState('')
+  const [listErr, setListErr] = useState('')
   useEffect(() => {
     api
       .library()
       .then((r) => setProjects(r.projects))
-      .catch(() => {})
+      .catch((e) => setListErr(errMsg(e)))
   }, [])
 
   // A plain bin gets its Library entry on the first save or download (DesignStep creates it), not on this click.
@@ -151,7 +152,8 @@ export default function HomeView({ update }: { update: (p: Partial<Session>) => 
       </div>
       <aside className="panel">
         <h2>Recent projects</h2>
-        {projects.length === 0 && (
+        {listErr && <div className="status err">Could not load your projects: {listErr}</div>}
+        {projects.length === 0 && !listErr && (
           <p className="hint">Your projects will show up here with a picture of the result.</p>
         )}
         {opening && (

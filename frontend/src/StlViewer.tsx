@@ -64,8 +64,33 @@ type State = {
   renderer: THREE.WebGLRenderer
   mesh?: THREE.Mesh
   grid?: THREE.GridHelper
+  gridSpec?: { cells: number; cx: number; cy: number; z: number }
   box?: THREE.Box3
   hl?: THREE.Object3D
+}
+
+/** Free an object's GPU buffers (geometry and every material). three.js does not do this on scene.remove. */
+function disposeObject(o: THREE.Object3D) {
+  o.traverse((c) => {
+    const m = c as THREE.Mesh
+    m.geometry?.dispose?.()
+    const mats = Array.isArray(m.material) ? m.material : m.material ? [m.material] : []
+    for (const mat of mats) mat.dispose()
+  })
+}
+
+/** Floor grid in 42 mm cells under the model, coloured for the current theme. Replaces any previous grid. */
+function setGrid(s: State, cells: number, cx: number, cy: number, z: number) {
+  if (s.grid) {
+    s.scene.remove(s.grid)
+    disposeObject(s.grid)
+  }
+  const grid = new THREE.GridHelper(cells * 42, cells, theme.color('floorMajor'), theme.color('floor'))
+  grid.rotation.x = Math.PI / 2
+  grid.position.set(cx, cy, z)
+  s.scene.add(grid)
+  s.grid = grid
+  s.gridSpec = { cells, cx, cy, z }
 }
 
 const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
@@ -152,6 +177,9 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     scene.add(dir2)
     const controls = new OrbitControls(camera, renderer.domElement)
     // Per-axis direction flips (OrbitControls only offers one rotateSpeed for both axes).
+    // These wrap PRIVATE methods of the OrbitControls class in three 0.169 (pinned exactly in package.json).
+    // A three upgrade must re-check that _rotateLeft/_rotateUp/_dollyIn/_dollyOut/_pan still exist with
+    // these signatures, or the flips and trackpad panning silently stop working.
     const c = controls as unknown as {
       _rotateLeft: (a: number) => void
       _rotateUp: (a: number) => void
@@ -186,7 +214,15 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       ONE: panRef.current ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE,
       TWO: THREE.TOUCH.DOLLY_PAN,
     }
-    controls.listenToKeyEvents(window) // arrow keys pan
+    // Arrow keys pan, but only while the view itself has focus. OrbitControls calls preventDefault on every
+    // arrow key it sees, so listening on window would break sliders, number boxes and text caret movement.
+    renderer.domElement.tabIndex = 0
+    renderer.domElement.setAttribute('role', 'application')
+    renderer.domElement.setAttribute(
+      'aria-label',
+      '3D model view. Click it, then use the arrow keys to pan. Use the buttons above it for preset angles',
+    )
+    controls.listenToKeyEvents(renderer.domElement)
     // Wheel: distinguish a mouse wheel / pinch (zoom) from two-finger trackpad scrolling (pan).
     //   pinch on a trackpad arrives as a wheel event with ctrlKey; mouse wheels report line deltas
     //   or large pixel steps; trackpad scrolls are small pixel deltas, often with a deltaX.
@@ -208,16 +244,30 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     camera.up.set(0, 0, 1)
     camera.position.set(150, -150, 130)
     controls.target.set(0, 0, 0)
-    const grid = new THREE.GridHelper(420, 10, theme.color('floorMajor'), theme.color('floor'))
-    grid.rotation.x = Math.PI / 2
-    grid.position.z = -0.05
-    scene.add(grid)
-    st.current = { scene, camera, controls, renderer, grid }
+    const state: State = { scene, camera, controls, renderer }
+    setGrid(state, 10, 0, 0, -0.05)
+    st.current = state
     const onKey = (e: KeyboardEvent) => {
       controls.mouseButtons.LEFT = e.shiftKey || panRef.current ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE
     } // shift+drag pans
     window.addEventListener('keydown', onKey)
     window.addEventListener('keyup', onKey)
+    // Follow the OS light/dark switch: CSS variables update on their own, the GPU colours do not.
+    const recolor = () => {
+      const s = st.current
+      if (!s) return
+      if (s.mesh) (s.mesh.material as THREE.MeshStandardMaterial).color.set(theme.color('model'))
+      if (s.gridSpec) {
+        const { cells, cx, cy, z } = s.gridSpec
+        setGrid(s, cells, cx, cy, z)
+      }
+      s.hl?.traverse((o) => {
+        const mat = (o as THREE.Mesh).material as THREE.MeshBasicMaterial | undefined
+        mat?.color?.set(theme.color('modelSelected'))
+      })
+    }
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
+    mq?.addEventListener?.('change', recolor)
 
     // ---- tool dragging in 3D
     const ray = new THREE.Raycaster()
@@ -275,6 +325,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     renderer.domElement.addEventListener('pointerdown', onDown, { capture: true })
     renderer.domElement.addEventListener('pointermove', onMove)
     renderer.domElement.addEventListener('pointerup', onUp)
+    renderer.domElement.addEventListener('pointercancel', onUp) // a touch the browser took over mid-drag
     renderer.domElement.addEventListener('pointerleave', onUp)
     renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault())
 
@@ -311,9 +362,13 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     }
     loop()
     const onResize = () => {
-      camera.aspect = el.clientWidth / el.clientHeight
+      // The pane can be 0 px tall mid-layout (the phone breakpoint, a collapsing grid row): a 0/0 aspect
+      // is NaN and nothing renders until the next resize, so clamp like the constructor does.
+      const w = Math.max(el.clientWidth, 1),
+        h = Math.max(el.clientHeight, 1)
+      camera.aspect = w / h
       camera.updateProjectionMatrix()
-      renderer.setSize(el.clientWidth, el.clientHeight)
+      renderer.setSize(w, h)
     }
     window.addEventListener('resize', onResize)
     const ro = new ResizeObserver(onResize)
@@ -325,9 +380,14 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       window.removeEventListener('resize', onResize)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('keyup', onKey)
+      mq?.removeEventListener?.('change', recolor)
       renderer.domElement.removeEventListener('wheel', onWheel, { capture: true } as EventListenerOptions)
       controls.stopListenToKeyEvents()
       controls.dispose()
+      // Free the GPU side too: renderer.dispose() alone leaves buffers and the WebGL context alive until the
+      // browser gets round to collecting it, and browsers cap live contexts at about 16.
+      disposeObject(scene)
+      renderer.forceContextLoss()
       renderer.dispose()
       el.innerHTML = ''
       st.current = null
@@ -347,7 +407,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       const hadMesh = !!s.mesh
       if (s.mesh) {
         s.scene.remove(s.mesh)
-        s.mesh.geometry.dispose()
+        disposeObject(s.mesh) // geometry and material: every preview would otherwise leak a material
       }
       const mesh = new THREE.Mesh(
         geom,
@@ -363,13 +423,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       s.box = box
       const sz = box.getSize(new THREE.Vector3())
       const c = box.getCenter(new THREE.Vector3())
-      if (s.grid) s.scene.remove(s.grid)
-      const cells = Math.ceil(Math.max(sz.x, sz.y) / 42) + 2
-      const grid = new THREE.GridHelper(cells * 42, cells, theme.color('floorMajor'), theme.color('floor'))
-      grid.rotation.x = Math.PI / 2
-      grid.position.set(c.x, c.y, box.min.z - 0.05)
-      s.scene.add(grid)
-      s.grid = grid
+      setGrid(s, Math.ceil(Math.max(sz.x, sz.y) / 42) + 2, c.x, c.y, box.min.z - 0.05)
       if (!hadMesh) setView('home')
       setMeshVersion((v) => v + 1)
       onStats?.(
@@ -388,11 +442,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     if (!s) return
     if (s.hl) {
       s.scene.remove(s.hl)
-      s.hl.traverse((o) => {
-        const m = o as THREE.Mesh
-        m.geometry?.dispose?.()
-        ;(m.material as THREE.Material | undefined)?.dispose?.()
-      })
+      disposeObject(s.hl)
       s.hl = undefined
     }
     if (!highlight || highlight.length < 3 || !s.box) return
@@ -488,8 +538,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
             </select>
           </label>
           <span className="hint">
-            pinch or mouse wheel zooms to the cursor · right/middle-drag or shift-drag pans · arrow keys pan ·
-            saved in this browser
+            pinch or mouse wheel zooms to the cursor · right/middle-drag or shift-drag pans · arrow keys pan
+            once the view is clicked · saved in this browser
           </span>
         </div>
       )}

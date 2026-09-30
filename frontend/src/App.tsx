@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { TRACE_STEPS, TRACE_STEP_HINTS, Session, initialSession } from './types'
+import { TRACE_STEPS, TRACE_STEP_HINTS, Session, Update, initialSession } from './types'
 import { api, errMsg } from './api'
 import { snapshot } from './project'
 import { isMeaningful, loadSession, saveSession } from './session'
@@ -83,7 +83,10 @@ function ProjectName({
 
 export default function App() {
   const [s, setS] = useState<Session>(() => loadSession() ?? initialSession)
-  const update = useCallback((patch: Partial<Session>) => setS((prev) => ({ ...prev, ...patch })), [])
+  const update = useCallback<Update>(
+    (patch) => setS((prev) => ({ ...prev, ...(typeof patch === 'function' ? patch(prev) : patch) })),
+    [],
+  )
   const canGo = (i: number) =>
     i === 0 || (i === 1 && !!s.upload) || (i === 2 && !!s.rect) || (i === 3 && s.tools.length > 0)
   const sRef = useRef(s)
@@ -103,7 +106,6 @@ export default function App() {
 
   // ---- (b) server autosave: 3 s after tools/bin/corners change, right away on a step change
   const [saveState, setSaveState] = useState<SaveState>('idle')
-  const workKey = JSON.stringify({ t: s.tools, b: s.bin, c: s.corners })
   const lastSaved = useRef<string>('')
   const prevStep = useRef(s.step)
   const inFlight = useRef(false)
@@ -148,16 +150,23 @@ export default function App() {
     }
   }, [])
 
+  // A different project: forget the last key (it belongs to the other project) and treat the step it
+  // opens on as the starting point, so opening does not fire an instant re-save of unchanged state.
+  // Declared before the autosave effect so it runs first in the same commit.
+  useEffect(() => {
+    lastSaved.current = ''
+    prevStep.current = s.step
+    if (!s.projectId) setSaveState('idle')
+  }, [s.projectId]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Deps are the objects themselves, not a JSON key: hashing every polygon on each render (every
+  // pointermove while dragging) is expensive, and re-arming a 3 s timer is not.
   useEffect(() => {
     if (!s.projectId || (s.view !== 'trace' && s.view !== 'bin')) return
     if (prevStep.current !== s.step) immediate.current = true
     prevStep.current = s.step
     const h = setTimeout(doSave, immediate.current ? 0 : 3000)
     return () => clearTimeout(h)
-  }, [workKey, s.step, s.view, s.projectId, doSave])
-  useEffect(() => {
-    if (!s.projectId) setSaveState('idle')
-  }, [s.projectId])
+  }, [s.tools, s.bin, s.corners, s.step, s.view, s.projectId, doSave])
   useEffect(
     () => () => {
       if (retryTimer.current) clearTimeout(retryTimer.current)

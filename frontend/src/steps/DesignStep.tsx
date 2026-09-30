@@ -15,16 +15,15 @@ import {
 import { snapshot } from '../project'
 import StlViewer, { DragApi, StlViewerHandle } from '../StlViewer'
 import type { FingerHole, Session, Sit, Tool } from '../types'
-import { depthFor, maxPocketDepth } from '../types'
+import { MAX_GRID, MAX_HEIGHT_UNITS, PITCH, depthFor, maxPocketDepth } from '../types'
 import { Tip, toast } from '../ui'
-import { numOr, safeFileName } from '../util'
+import { normDeg, numOr, safeFileName } from '../util'
 
-const PITCH = 42
 const MARGIN = 3
 /** mm of wall to keep around any cut. The stacking lip's inner face sits 2.6 mm in, so keep 3 mm when there is a lip. */
 const wallKeepFor = (bin: BinIn) => (bin.lip === 'regular' ? 3.0 : 2.0)
 
-export function placedPolygon(t: Tool): Poly {
+function placedPolygon(t: Tool): Poly {
   return transform(recentre(t.offset), t.rot, t.x, t.y)
 }
 /** World centre of a notch: the point at fraction s along the tool's pocket outline. */
@@ -114,25 +113,22 @@ function packRows(tools: Tool[], bin: BinIn) {
     usedW = Math.max(usedW, x)
   }
   const totalH = y + rowH + MARGIN
-  const gx = Math.max(1, Math.ceil((usedW + 0.5) / PITCH)),
-    gy = Math.max(1, Math.ceil((totalH + 0.5) / PITCH))
+  // Never ask for a bin the server refuses: past MAX_GRID the tools are flagged as outside instead.
+  const gx = Math.min(MAX_GRID, Math.max(1, Math.ceil((usedW + 0.5) / PITCH))),
+    gy = Math.min(MAX_GRID, Math.max(1, Math.ceil((totalH + 0.5) / PITCH)))
   const W = PITCH * gx - 0.5,
     L = PITCH * gy - 0.5
   const dx = (W - usedW) / 2,
     dy = (L - totalH) / 2
   const maxDepth = Math.max(0, ...tools.map((t) => t.depth))
-  const hu = Math.max(bin.height_units, Math.ceil((maxDepth + 7) / 7))
+  const hu = Math.min(MAX_HEIGHT_UNITS, Math.max(bin.height_units, Math.ceil((maxDepth + 7) / 7)))
   return {
     tools: placed.map((t) => ({ ...t, x: t.x + dx, y: t.y + dy })),
     bin: { ...bin, grid_x: gx, grid_y: gy, height_units: hu },
     cells: gx * gy,
   }
 }
-export function autoFit(
-  tools: Tool[],
-  bin: BinIn,
-  orient: 'auto' | 'horizontal' | 'vertical' | 'keep' = 'auto',
-) {
+function autoFit(tools: Tool[], bin: BinIn, orient: 'auto' | 'horizontal' | 'vertical' | 'keep' = 'auto') {
   if (!tools.length) return { tools, bin }
   const variants: Tool[][] = []
   if (orient === 'keep') variants.push(tools)
@@ -179,7 +175,11 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
   useEffect(() => {
     const up = () => setDrag(null)
     window.addEventListener('pointerup', up)
-    return () => window.removeEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    return () => {
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+    }
   }, [])
   useEffect(() => {
     if (s.tools.length && s.tools.every((t) => t.x === 0 && t.y === 0)) {
@@ -203,19 +203,34 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
   )
   const inside = ([x, y]: [number, number]) =>
     x >= wallKeep && y >= wallKeep && x <= W - wallKeep && y <= L - wallKeep
+  // Tools are matched by id, not name, so two tools called the same thing are flagged separately.
   const outside = placed
     .filter(({ poly, cuts }) => poly.some((p) => !inside(p)) || cuts.some((c) => c.some((p) => !inside(p))))
-    .map((p) => p.t.name)
+    .map((p) => p.t)
+  const outsideIds = new Set(outside.map((t) => t.id))
+  // Longer than the biggest bin the server makes: no amount of dragging or Auto-arrange will fit it.
+  const maxSpan = PITCH * MAX_GRID - 0.5 - 2 * wallKeep
+  const tooBig = placed.filter(({ poly }) => {
+    const b = bbox(poly)
+    return Math.min(b.w, b.h) > maxSpan || (b.w > maxSpan && b.h > maxSpan)
+  })
   const maxDepth = maxPocketDepth(bin)
   const tooDeep = s.tools.filter((t) => t.depth > maxDepth + 1e-6)
   const shallow = s.tools.filter((t) => t.depth < 0.4 * t.thickness)
   const overDeep = s.tools.filter((t) => t.depth > t.thickness + 3 && t.fingerHoles.length === 0)
-  const neededUnits = Math.ceil((Math.max(0, ...s.tools.map((t) => t.depth)) + 7) / 7)
+  const deepest = Math.max(0, ...s.tools.map((t) => t.depth))
+  const neededUnits = Math.ceil((deepest + 7) / 7)
+  const canRaise = neededUnits <= MAX_HEIGHT_UNITS
   const blocked = tooDeep.length > 0 || outside.length > 0
+  const names = (ts: Tool[]) => ts.map((t) => t.name).join(', ')
 
   // ---- live preview: debounced, aborts the superseded request, paused while dragging, skipped while blocked
-  const previewKey = JSON.stringify({ bin, p: pockets(s.tools) })
+  // The key is only hashed when idle: during a drag every pointermove changes s.tools and nothing is sent anyway.
   const idle = drag === null && !drag3d
+  const previewKey = useMemo(
+    () => (idle ? JSON.stringify({ bin, p: pockets(s.tools) }) : ''),
+    [bin, s.tools, idle],
+  )
   useEffect(() => {
     if (!idle || blocked) return
     const id = ++reqId.current
@@ -246,6 +261,25 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
   }, [previewKey, idle, blocked]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- 2D layout interaction
+  /** Arrow keys move the focused pocket 1 mm (shift: 5 mm); [ and ] turn it 5 degrees. */
+  function pocketKey(e: React.KeyboardEvent, t: Tool) {
+    const step = e.shiftKey ? 5 : 1
+    const d: Record<string, [number, number]> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step],
+    }
+    if (e.key === '[' || e.key === ']') {
+      e.preventDefault()
+      patch(t.id, { rot: normDeg(t.rot + (e.key === ']' ? 5 : -5)) })
+      return
+    }
+    const v = d[e.key]
+    if (!v) return
+    e.preventDefault()
+    patch(t.id, { x: t.x + v[0], y: t.y + v[1] })
+  }
   function toMM(e: React.PointerEvent): [number, number] {
     const svg = svgRef.current!
     const pt = svg.createSVGPoint()
@@ -301,9 +335,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
           setTools(toolsRef.current.map((t) => (t.id === id ? { ...t, x: st.x + dx, y: st.y + dy } : t)))
         },
         onDragEnd: () => setDrag3d(false),
-        onSelect: (id) => {
-          if (id) setSel(id)
-        },
+        onSelect: setSel, // empty space clears the selection, same as in the 2D layout
       }
     : undefined
 
@@ -386,7 +418,8 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
       setBusy('')
     }
   }
-  const num = (e: React.ChangeEvent<HTMLInputElement>, prev: number) => numOr(e.target.value, prev)
+  const num = (e: React.ChangeEvent<HTMLInputElement>, prev: number, min: number, max: number) =>
+    numOr(e.target.value, prev, min, max)
   const canExport = !busy && !blocked && !previewBusy
   const exportTitle = busy
     ? 'Wait for the current job to finish'
@@ -402,7 +435,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
     dividersY = bin.solid ? 0 : bin.dividers_y
   const layoutHint =
     s.tools.length > 0
-      ? 'drag a pocket to move it · drag a notch along its edge'
+      ? 'drag a pocket to move it, or tab to it and use the arrow keys · drag a notch along its edge'
       : dividersX + dividersY > 0
         ? 'plain bin · dividers shown dashed'
         : 'plain bin · the 42 mm grid is dotted'
@@ -434,6 +467,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
             style={{ touchAction: 'none', width: '100%', height: 'calc(100% - 30px)' }}
             onPointerMove={move}
             onPointerUp={() => setDrag(null)}
+            onPointerCancel={() => setDrag(null)}
             onPointerDown={() => setSel(null)}
           >
             <rect
@@ -510,10 +544,19 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
             ))}
             {placed.map(({ t, poly, cuts }) => {
               const [cx, cy] = centroid(poly)
-              const bad = tooDeep.includes(t) || outside.includes(t.name)
+              const bad = tooDeep.includes(t) || outsideIds.has(t.id)
               const isSel = t.id === sel
               return (
-                <g key={t.id} onPointerDown={(e) => down(e, t)} style={{ cursor: 'move' }}>
+                <g
+                  key={t.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${t.name} pocket, ${t.depth} mm deep${bad ? ', needs attention' : ''}. Arrow keys move it 1 mm, shift for 5 mm, [ and ] turn it`}
+                  onFocus={() => setSel(t.id)}
+                  onKeyDown={(e) => pocketKey(e, t)}
+                  onPointerDown={(e) => down(e, t)}
+                  style={{ cursor: 'move' }}
+                >
                   <path
                     d={toPath(poly)}
                     fill={
@@ -614,38 +657,47 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
             </button>
           </div>
         )}
-        {outside.length > 0 && (
+        {tooBig.length > 0 && (
           <div className="status err">
-            Too close to the wall or outside the bin: {outside.join(', ')}. Drag it in, shrink the cut, or add
-            a grid unit.
+            Bigger than the largest bin ({MAX_GRID} units, {Math.round(maxSpan)} mm across):{' '}
+            {names(tooBig.map((p) => p.t))}. Remove it, or trace it again with less clearance.
+          </div>
+        )}
+        {outside.length > tooBig.length && (
+          <div className="status err">
+            Too close to the wall or outside the bin:{' '}
+            {names(outside.filter((t) => !tooBig.some((p) => p.t === t)))}. Drag it in, shrink the cut, or add
+            a grid unit
+            {bin.grid_x >= MAX_GRID || bin.grid_y >= MAX_GRID ? ` (${MAX_GRID} is the most)` : ''}.
           </div>
         )}
         {tooDeep.length > 0 && (
           <div className="status err">
-            Too deep for a {bin.height_units}-unit bin (max pocket {maxDepth} mm):{' '}
-            {tooDeep.map((t) => t.name).join(', ')}.
-            <button
-              className="ghost"
-              title="Make the bin tall enough for the deepest pocket"
-              onClick={() => {
-                setBin({ height_units: neededUnits })
-                toast(`Bin is now ${neededUnits} units tall`)
-              }}
-            >
-              Raise bin to {neededUnits} units
-            </button>
+            Too deep for a {bin.height_units}-unit bin (max pocket {maxDepth} mm): {names(tooDeep)}.
+            {canRaise ? (
+              <button
+                className="ghost"
+                title="Make the bin tall enough for the deepest pocket"
+                onClick={() => {
+                  setBin({ height_units: neededUnits })
+                  toast(`Bin is now ${neededUnits} units tall`)
+                }}
+              >
+                Raise bin to {neededUnits} units
+              </button>
+            ) : (
+              ` Even the tallest bin (${MAX_HEIGHT_UNITS} units, ${maxPocketDepth({ ...bin, height_units: MAX_HEIGHT_UNITS })} mm pockets) is too shallow. Lower the pocket depth or thickness.`
+            )}
           </div>
         )}
         {shallow.length > 0 && (
           <div className="status warn">
-            Shallow pocket (under 40% of the tool thickness), may not hold:{' '}
-            {shallow.map((t) => t.name).join(', ')}.
+            Shallow pocket (under 40% of the tool thickness), may not hold: {names(shallow)}.
           </div>
         )}
         {overDeep.length > 0 && (
           <div className="status warn">
-            Pocket much deeper than the tool with no notch, hard to grab:{' '}
-            {overDeep.map((t) => t.name).join(', ')}.
+            Pocket much deeper than the tool with no notch, hard to grab: {names(overDeep)}.
           </div>
         )}
         {err && <div className="status err">{err}</div>}
@@ -656,10 +708,10 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
           <input
             type="number"
             min={1}
-            max={10}
+            max={MAX_GRID}
             value={bin.grid_x}
-            title="Grid cells left to right. 1 unit = 42 mm. 2 to 4 is typical"
-            onChange={(e) => setBin({ grid_x: num(e, bin.grid_x) })}
+            title={`Grid cells left to right. 1 unit = 42 mm. 2 to 4 is typical, ${MAX_GRID} is the most`}
+            onChange={(e) => setBin({ grid_x: Math.round(num(e, bin.grid_x, 1, MAX_GRID)) })}
           />
         </label>
         <label className="row">
@@ -667,10 +719,10 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
           <input
             type="number"
             min={1}
-            max={10}
+            max={MAX_GRID}
             value={bin.grid_y}
-            title="Grid cells front to back. 1 unit = 42 mm"
-            onChange={(e) => setBin({ grid_y: num(e, bin.grid_y) })}
+            title={`Grid cells front to back. 1 unit = 42 mm, ${MAX_GRID} is the most`}
+            onChange={(e) => setBin({ grid_y: Math.round(num(e, bin.grid_y, 1, MAX_GRID)) })}
           />
         </label>
         <label className="row">
@@ -678,10 +730,12 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
           <input
             type="number"
             min={1}
-            max={20}
+            max={MAX_HEIGHT_UNITS}
             value={bin.height_units}
-            title="Bin height in 7 mm units, not counting the lip. 3 units = 21 mm"
-            onChange={(e) => setBin({ height_units: num(e, bin.height_units) })}
+            title={`Bin height in 7 mm units, not counting the lip. 3 units = 21 mm, ${MAX_HEIGHT_UNITS} is the most`}
+            onChange={(e) =>
+              setBin({ height_units: Math.round(num(e, bin.height_units, 1, MAX_HEIGHT_UNITS)) })
+            }
           />
         </label>
         <p className="hint">
@@ -735,7 +789,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                 max={11}
                 value={bin.dividers_x + 1}
                 title="How many sections left to right. 1 means no divider"
-                onChange={(e) => setBin({ dividers_x: num(e, bin.dividers_x + 1) - 1 })}
+                onChange={(e) => setBin({ dividers_x: Math.round(num(e, bin.dividers_x + 1, 1, 11)) - 1 })}
               />
             </label>
             <label className="row">
@@ -746,7 +800,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                 max={11}
                 value={bin.dividers_y + 1}
                 title="How many sections front to back. 1 means no divider"
-                onChange={(e) => setBin({ dividers_y: num(e, bin.dividers_y + 1) - 1 })}
+                onChange={(e) => setBin({ dividers_y: Math.round(num(e, bin.dividers_y + 1, 1, 11)) - 1 })}
               />
             </label>
             <label className="row chk">
@@ -767,7 +821,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                   max={30}
                   value={bin.scoop_radius}
                   title="Size of the rounded scoop. 10 mm is typical"
-                  onChange={(e) => setBin({ scoop_radius: num(e, bin.scoop_radius) })}
+                  onChange={(e) => setBin({ scoop_radius: num(e, bin.scoop_radius, 2, 30) })}
                 />
               </label>
             )}
@@ -795,30 +849,30 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
               <>
                 <div style={{ fontWeight: 600 }}>{selTool.name}</div>
                 <label className="row">
-                  Rotation ({selTool.rot}°)
+                  Rotation ({Math.round(normDeg(selTool.rot))}°)
                   <input
                     type="range"
                     min={-180}
                     max={180}
                     step={1}
-                    value={selTool.rot}
+                    value={Math.round(normDeg(selTool.rot))}
                     title="Turn the pocket. Drag the slider or use the arrow keys"
-                    aria-valuetext={`${selTool.rot} degrees`}
-                    onChange={(e) => patch(selTool.id, { rot: num(e, selTool.rot) })}
+                    aria-valuetext={`${Math.round(normDeg(selTool.rot))} degrees`}
+                    onChange={(e) => patch(selTool.id, { rot: num(e, selTool.rot, -180, 180) })}
                   />
                 </label>
                 <div className="btnrow">
                   <button
                     className="secondary"
                     title="Turn the tool so its long side is level"
-                    onClick={() => patch(selTool.id, { rot: selTool.straightRot })}
+                    onClick={() => patch(selTool.id, { rot: normDeg(selTool.straightRot) })}
                   >
                     Straighten
                   </button>
                   <button
                     className="secondary"
                     title="Turn the pocket a quarter turn clockwise"
-                    onClick={() => patch(selTool.id, { rot: selTool.rot + 90 })}
+                    onClick={() => patch(selTool.id, { rot: normDeg(selTool.rot + 90) })}
                   >
                     Rotate 90°
                   </button>
@@ -832,7 +886,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                     max={100}
                     value={selTool.thickness}
                     title="How tall the tool is lying flat. The pocket depth follows from this"
-                    onChange={(e) => setThickness(selTool, num(e, selTool.thickness))}
+                    onChange={(e) => setThickness(selTool, num(e, selTool.thickness, 1, 100))}
                   />
                 </label>
                 <label className="row">
@@ -863,7 +917,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                         ? 'How deep the pocket goes'
                         : 'Set by "How it sits". Pick Custom to type your own'
                     }
-                    onChange={(e) => patch(selTool.id, { depth: num(e, selTool.depth) })}
+                    onChange={(e) => patch(selTool.id, { depth: num(e, selTool.depth, 1, 140) })}
                   />
                 </label>
 
@@ -918,7 +972,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                         max={40}
                         value={h.diameter}
                         title="Width of the notch. 20 mm fits a fingertip"
-                        onChange={(e) => patchCut(selTool, i, { diameter: num(e, h.diameter) })}
+                        onChange={(e) => patchCut(selTool, i, { diameter: num(e, h.diameter, 8, 40) })}
                       />
                     </label>
                     <label className="row">
@@ -930,7 +984,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                         step={0.5}
                         value={h.extraDepth}
                         title="How much deeper than the pocket the notch goes. 3 mm is typical"
-                        onChange={(e) => patchCut(selTool, i, { extraDepth: num(e, h.extraDepth) })}
+                        onChange={(e) => patchCut(selTool, i, { extraDepth: num(e, h.extraDepth, 0, 20) })}
                       />
                     </label>
                     <label className="row">
@@ -943,7 +997,7 @@ export default function DesignStep({ s, update }: { s: Session; update: (p: Part
                         value={h.s}
                         title="Slide the notch around the pocket outline"
                         aria-valuetext={`${Math.round(h.s * 100)}% of the way around`}
-                        onChange={(e) => patchCut(selTool, i, { s: num(e, h.s) })}
+                        onChange={(e) => patchCut(selTool, i, { s: num(e, h.s, 0, 1) })}
                       />
                     </label>
                   </div>

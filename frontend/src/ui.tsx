@@ -1,4 +1,5 @@
 import { Component, ReactNode, useEffect, useState } from 'react'
+import { clearSession } from './session'
 
 /** Translucent overlay for a canvas while work is in progress. `block` also swallows pointer events. */
 export function BusyOverlay({ text, block = false }: { text: string; block?: boolean }) {
@@ -40,11 +41,11 @@ export function Toasts() {
       listeners.delete(setList)
     }
   }, [])
-  if (!list.length) return null
+  // One live region, always mounted, so a screen reader announces each new toast exactly once.
   return (
-    <div className="toasts" aria-live="polite">
+    <div className="toasts" aria-live="polite" aria-relevant="additions">
       {list.map((t) => (
-        <div key={t.id} className={'toast ' + t.kind} role="status">
+        <div key={t.id} className={'toast ' + t.kind}>
           {t.text}
           {t.action && (
             <button
@@ -132,9 +133,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
             className="secondary"
             title="Clear the saved session and reload"
             onClick={() => {
-              try {
-                localStorage.removeItem('gt.session')
-              } catch {}
+              clearSession()
               location.reload()
             }}
           >

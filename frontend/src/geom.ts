@@ -1,5 +1,16 @@
 import type { Poly, Pt } from './api'
 
+/** Unsigned polygon area (shoelace). */
+export function area(p: Poly) {
+  let a = 0
+  for (let i = 0; i < p.length; i++) {
+    const [x0, y0] = p[i],
+      [x1, y1] = p[(i + 1) % p.length]
+    a += x0 * y1 - x1 * y0
+  }
+  return Math.abs(a) / 2
+}
+
 export function centroid(p: Poly): Pt {
   let a = 0,
     cx = 0,

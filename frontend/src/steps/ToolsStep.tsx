@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, errMsg, Poly, ToolOutline } from '../api'
-import { toPath } from '../geom'
-import type { Session, Tool } from '../types'
+import { area, toPath } from '../geom'
+import type { Session, Tool, Update } from '../types'
 import { depthFor } from '../types'
 import { BusyOverlay, Tip, toast } from '../ui'
-import { numOr, sourceLabel, uid } from '../util'
+import { isAutoTraced, nextToolName, numOr, sourceLabel, uid } from '../util'
 
 type SamPt = { x: number; y: number; label: number }
 type PointMode = 'add' | 'exclude'
@@ -13,7 +13,7 @@ type VertexRef = { tool: string; idx: number }
 /** rect_ids we already auto-detected for, so coming back to this step does not re-run it. */
 const autoRanFor = new Set<string>()
 
-export default function ToolsStep({ s, update }: { s: Session; update: (p: Partial<Session>) => void }) {
+export default function ToolsStep({ s, update }: { s: Session; update: Update }) {
   const rect = s.rect!
   const ppm = rect.px_per_mm
   const svgRef = useRef<SVGSVGElement>(null)
@@ -43,6 +43,13 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
       mounted.current = false
     }
   }, [])
+  /** Change the tools even if the user has already left this step. After unmount the change goes through
+   *  the live session, and only if it still shows this straightened photo: a re-straightened photo gets a
+   *  new rect_id, and outlines traced on the old one would land in the wrong place on it. */
+  const applyTools = (fn: (cur: Tool[]) => Tool[]) => {
+    if (mounted.current) setTools(fn(toolsRef.current))
+    else update((prev) => (prev.rect?.rect_id === rect.rect_id ? { tools: fn(prev.tools) } : {}))
+  }
 
   function toPx(e: React.PointerEvent | React.MouseEvent): [number, number] {
     const svg = svgRef.current!
@@ -93,24 +100,42 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
     return t
   }
 
+  // Find tools / Simple contrast replace what an earlier run of either drew. Click traces and re-traces are
+  // the user's own work and stay. One run at a time: the buttons are disabled while busy, and this ref also
+  // covers the auto-run on landing racing a click.
+  const detecting = useRef(false)
   async function detect(method: 'auto' | 'classical') {
-    setBusy('Looking for tools…')
+    if (detecting.current) return
+    detecting.current = true
+    setBusy(method === 'auto' ? 'Looking for tools…' : 'Picking out dark shapes…')
     setErr('')
     try {
       const r = await api.detectAuto(rect.rect_id, method)
       const good = r.tools.filter((o) => o.polygon.length >= 3)
-      if (!good.length)
-        setErr(
-          method === 'auto'
-            ? 'No tools found. Try "Simple contrast", or click a tool in the photo to trace it by hand.'
-            : 'No tools found. Try "Find tools", or click a tool in the photo to trace it by hand.',
-        )
+      if (!good.length) {
+        if (mounted.current)
+          setErr(
+            method === 'auto'
+              ? 'No tools found. Try "Simple contrast", or click a tool in the photo to trace it by hand.'
+              : 'No tools found. Try "Find tools", or click a tool in the photo to trace it by hand.',
+          )
+        return
+      }
+      const kept = toolsRef.current.filter((t) => !isAutoTraced(t))
+      const replaced = toolsRef.current.length - kept.length
       const made: Tool[] = []
-      for (const o of good) made.push(await makeTool(o, `Tool ${toolsRef.current.length + made.length + 1}`))
-      if (made.length) setTools([...toolsRef.current, ...made])
+      for (const o of good) made.push(await makeTool(o, nextToolName([...kept, ...made])))
+      applyTools((cur) => [...cur.filter((t) => !isAutoTraced(t)), ...made])
+      if (sel && !kept.some((t) => t.id === sel)) {
+        setSel(null)
+        setSelV(null)
+      }
+      const n = `${made.length} tool${made.length === 1 ? '' : 's'}`
+      toast(replaced ? `Found ${n}, replacing the ${replaced} auto-traced before` : `Found ${n}`)
     } catch (e) {
-      setErr(errMsg(e))
+      if (mounted.current) setErr(errMsg(e))
     } finally {
+      detecting.current = false
       if (mounted.current) setBusy('')
     }
   }
@@ -135,9 +160,17 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
     setErr('')
     try {
       const r = await api.detectSam(rect.rect_id, pts)
-      if (seq !== samSeq.current) return
-      setSamPreview(r.tools[0] ?? null)
-      if (!r.tools.length) setErr('Nothing traced here. Click another spot on the tool.')
+      if (seq !== samSeq.current || !mounted.current) return
+      // Only exclude points, or every click off a tool, comes back as no outline at all: keep the points so
+      // the next click can add to them, but drop any earlier green preview.
+      const first = r.tools.find((o) => Array.isArray(o.polygon) && o.polygon.length >= 3) ?? null
+      setSamPreview(first)
+      if (!first)
+        setErr(
+          pts.every((p) => !p.label)
+            ? 'Those are all exclude points. Click on the tool itself to trace it, then use exclude points to carve bits out.'
+            : 'Nothing traced here. Click on the tool itself to trace it.',
+        )
     } catch (e) {
       if (seq === samSeq.current) setErr(errMsg(e))
     } finally {
@@ -150,15 +183,15 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
     setBusy('Cleaning up the outline…')
     setErr('')
     try {
-      const t = await makeTool(preview, `Tool ${toolsRef.current.length + 1}`)
-      setTools([...toolsRef.current, t])
+      const t = await makeTool(preview, nextToolName(toolsRef.current))
+      applyTools((cur) => [...cur, t])
       setSamPts([])
       setSamPreview(null)
       setSel(t.id)
       setSelV(null)
       toast(`Added ${t.name}`)
     } catch (e) {
-      setErr(errMsg(e))
+      if (mounted.current) setErr(errMsg(e))
     } finally {
       if (mounted.current) setBusy('')
     }
@@ -173,7 +206,8 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
 
   // ---- outline recomputation, one in-flight counter per tool so a slow older answer never overwrites a newer one
   const offsetSeq = useRef<Record<string, number>>({})
-  async function reoffset(t: Tool, patch: Partial<Tool>) {
+  /** Returns true when the recomputed outline was applied (false if superseded, removed, or failed). */
+  async function reoffset(t: Tool, patch: Partial<Tool>): Promise<boolean> {
     const nt = { ...t, ...patch }
     const seq = (offsetSeq.current[t.id] = (offsetSeq.current[t.id] ?? 0) + 1)
     // optimistic: apply the option now, swap in the recomputed outline when it arrives
@@ -191,15 +225,15 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
         symmetric: nt.symmetric,
         convex: nt.convex,
       })
-      if (offsetSeq.current[t.id] !== seq) return
-      if (!toolsRef.current.some((x) => x.id === t.id)) return // removed meanwhile
-      setTools(
-        toolsRef.current.map((x) =>
-          x.id === t.id ? { ...x, offset: off.polygon, straightRot: off.straighten_deg } : x,
-        ),
+      if (offsetSeq.current[t.id] !== seq) return false
+      // a tool removed meanwhile is simply not in the list any more, so the map is a no-op
+      applyTools((cur) =>
+        cur.map((x) => (x.id === t.id ? { ...x, offset: off.polygon, straightRot: off.straighten_deg } : x)),
       )
+      return true
     } catch (e) {
-      if (offsetSeq.current[t.id] === seq) setErr(errMsg(e))
+      if (mounted.current && offsetSeq.current[t.id] === seq) setErr(errMsg(e))
+      return false
     }
   }
   const patchTool = (id: string, patch: Partial<Tool>) =>
@@ -279,6 +313,33 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
     setDragV(null)
     if (t) reoffset(t, {})
   }
+  /** Keyboard editing of a focused point: arrows move it 1 px (shift: 10 px), Delete removes it. */
+  function vertexKey(e: React.KeyboardEvent, toolId: string, idx: number) {
+    const t = findTool(toolId)
+    if (!t) return
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault()
+      deleteVertex({ tool: toolId, idx })
+      return
+    }
+    const step = (e.shiftKey ? 10 : 1) / ppm
+    const d: Record<string, [number, number]> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step],
+    }
+    const v = d[e.key]
+    if (!v) return
+    e.preventDefault()
+    patchTool(toolId, { raw: t.raw.map((p, i) => (i === idx ? [p[0] + v[0], p[1] + v[1]] : p)) })
+  }
+  /** The outline is recomputed once the key is released, not on every repeat while it is held. */
+  function vertexKeyUp(e: React.KeyboardEvent, toolId: string) {
+    if (!e.key.startsWith('Arrow')) return
+    const t = findTool(toolId)
+    if (t) reoffset(t, {})
+  }
   function edgeDblClick(e: React.MouseEvent, toolId: string, idx: number) {
     e.stopPropagation()
     const t = findTool(toolId)
@@ -297,29 +358,23 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
       const cur = findTool(t.id)
       if (r.tools[0] && r.tools[0].polygon.length >= 3 && cur) {
         setSelV(null)
-        await reoffset(cur, { raw: r.tools[0].polygon, source: r.tools[0].source })
-        toast(`Re-traced ${cur.name}`)
-      } else setErr('Could not tighten this outline. Try moving a few points by hand instead.')
+        const ok = await reoffset(cur, { raw: r.tools[0].polygon, source: r.tools[0].source })
+        if (ok) toast(`Re-traced ${cur.name}`)
+      } else if (mounted.current)
+        setErr('Could not tighten this outline. Try moving a few points by hand instead.')
     } catch (x) {
-      setErr(errMsg(x))
+      if (mounted.current) setErr(errMsg(x))
     } finally {
       if (mounted.current) setBusy('')
     }
-  }
-
-  useEffect(() => {
-    document.addEventListener('contextmenu', prevent)
-    return () => document.removeEventListener('contextmenu', prevent)
-  }, [])
-  const prevent = (e: Event) => {
-    if ((e.target as Element).closest?.('.canvas')) e.preventDefault()
   }
 
   const selTool = tools.find((t) => t.id === sel)
   const selVertex = selV && selV.tool === sel && selTool && selV.idx < selTool.raw.length ? selV : null
   const [px0, py0, px1, py1] = rect.paper_px
   const R = Math.max(rect.width, rect.height) / 160
-  const num = (e: React.ChangeEvent<HTMLInputElement>, prev: number) => numOr(e.target.value, prev)
+  const num = (e: React.ChangeEvent<HTMLInputElement>, prev: number, min: number, max: number) =>
+    numOr(e.target.value, prev, min, max)
 
   return (
     <>
@@ -337,6 +392,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
           onClick={onCanvasClick}
           onPointerMove={vertexMove}
           onPointerUp={vertexUp}
+          onPointerCancel={vertexUp}
           onContextMenu={(e) => {
             e.preventDefault()
             onCanvasClick(e)
@@ -403,6 +459,12 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                         stroke="var(--c-trace)"
                         strokeWidth={R / 3}
                         style={{ cursor: 'grab' }}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Point ${i + 1} of ${arr.length} on ${t.name}. Arrow keys move it, shift for 10 px, Delete removes it`}
+                        onFocus={() => setSelV({ tool: t.id, idx: i })}
+                        onKeyDown={(e) => vertexKey(e, t.id, i)}
+                        onKeyUp={(e) => vertexKeyUp(e, t.id)}
                         onPointerDown={(e) => vertexDown(e, t.id, i)}
                         onClick={(e) => e.stopPropagation()}
                       />
@@ -445,7 +507,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
           <button
             className="primary"
             disabled={!!busy}
-            title="Looks at the whole photo and traces every tool it can find"
+            title="Looks at the whole photo and traces every tool it can find. Replaces earlier auto-traced tools; click-traced ones stay"
             onClick={() => detect('auto')}
           >
             Find tools
@@ -453,7 +515,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
           <button
             className="secondary"
             disabled={!!busy}
-            title="Faster fallback with no AI: picks out dark tools against the white sheet by contrast. Try it when Find tools misses something"
+            title="Faster fallback with no AI: picks out dark tools against the white sheet by contrast. Replaces earlier auto-traced tools; click-traced ones stay"
             onClick={() => detect('classical')}
           >
             Simple contrast (no AI)
@@ -536,13 +598,19 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
           <p className="hint">No tools yet. Use Find tools, or click a tool in the photo.</p>
         )}
         {tools.map((t) => (
-          <div key={t.id} className={'toolcard' + (t.id === sel ? ' sel' : '')} onClick={() => setSel(t.id)}>
+          <div
+            key={t.id}
+            className={'toolcard' + (t.id === sel ? ' sel' : '')}
+            aria-current={t.id === sel ? 'true' : undefined}
+            onClick={() => setSel(t.id)}
+          >
             <div className="name">
               <input
                 type="text"
-                aria-label="Tool name"
-                title="Name this tool (shown on the pocket)"
+                aria-label={`Tool name. Focusing this selects ${t.name} for editing`}
+                title="Name this tool (shown on the pocket). Tabbing in here selects the tool"
                 value={t.name}
+                onFocus={() => setSel(t.id)}
                 onChange={(e) => patchTool(t.id, { name: e.target.value })}
               />
               <button
@@ -583,7 +651,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                     max="10"
                     value={t.clearance}
                     title="Gap between the tool and the pocket wall. 0.3 to 0.5 mm is snug, 1 to 1.5 mm drops in easily"
-                    onChange={(e) => reoffset(t, { clearance: num(e, t.clearance) })}
+                    onChange={(e) => reoffset(t, { clearance: num(e, t.clearance, -2, 10) })}
                   />
                 </label>
                 <label className="row">
@@ -595,7 +663,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                     max="1"
                     value={t.printerOffset}
                     title="Extra room for the printer's over-extrusion. 0.2 mm is typical"
-                    onChange={(e) => reoffset(t, { printerOffset: num(e, t.printerOffset) })}
+                    onChange={(e) => reoffset(t, { printerOffset: num(e, t.printerOffset, 0, 1) })}
                   />
                 </label>
                 <label className="row">
@@ -607,7 +675,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                     max="5"
                     value={t.gaussian}
                     title="Irons out pixel wobble along the outline. 1 mm is typical, 0 keeps every bump"
-                    onChange={(e) => reoffset(t, { gaussian: num(e, t.gaussian) })}
+                    onChange={(e) => reoffset(t, { gaussian: num(e, t.gaussian, 0, 5) })}
                   />
                 </label>
                 <label className="row">
@@ -619,7 +687,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                     max="10"
                     value={t.bridge * 2}
                     title="Fills slots narrower than this (between open jaws, say) that would print as fragile slivers. 3 mm is typical"
-                    onChange={(e) => reoffset(t, { bridge: num(e, t.bridge * 2) / 2 })}
+                    onChange={(e) => reoffset(t, { bridge: num(e, t.bridge * 2, 0, 10) / 2 })}
                   />
                 </label>
                 <label className="row chk">
@@ -659,7 +727,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                     value={t.thickness}
                     title="How tall the tool is lying flat. Sets how deep the pocket goes"
                     onChange={(e) => {
-                      const nt = { ...t, thickness: num(e, t.thickness) }
+                      const nt = { ...t, thickness: num(e, t.thickness, 1, 100) }
                       patchTool(t.id, { thickness: nt.thickness, depth: depthFor(nt) })
                     }}
                   />
@@ -677,7 +745,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                       max="3"
                       value={t.tolerance}
                       title="Drops outline points that move the shape by less than this. 0.3 mm is typical"
-                      onChange={(e) => reoffset(t, { tolerance: num(e, t.tolerance) })}
+                      onChange={(e) => reoffset(t, { tolerance: num(e, t.tolerance, 0, 3) })}
                     />
                   </label>
                   <label className="row">
@@ -689,7 +757,7 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                       max="10"
                       value={t.smooth}
                       title="Rounds off thin spikes smaller than this radius. 0 leaves them"
-                      onChange={(e) => reoffset(t, { smooth: num(e, t.smooth) })}
+                      onChange={(e) => reoffset(t, { smooth: num(e, t.smooth, 0, 10) })}
                     />
                   </label>
                 </details>
@@ -722,8 +790,8 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
                   {selVertex
                     ? `Point ${selVertex.idx + 1} of ${t.raw.length} selected. `
                     : 'Click a point on the outline to select it. '}
-                  Drag a point to move it. Shortcuts: double-click an edge to add a point, <kbd>alt</kbd>
-                  +click a point to delete it.
+                  Drag a point to move it, or tab to it and use the arrow keys (shift for 10 px). Shortcuts:
+                  double-click an edge to add a point, <kbd>alt</kbd>+click or <kbd>Delete</kbd> removes one.
                 </p>
               </>
             )}
@@ -751,14 +819,4 @@ export default function ToolsStep({ s, update }: { s: Session; update: (p: Parti
       </aside>
     </>
   )
-}
-
-function area(p: Poly) {
-  let a = 0
-  for (let i = 0; i < p.length; i++) {
-    const [x0, y0] = p[i],
-      [x1, y1] = p[(i + 1) % p.length]
-    a += x0 * y1 - x1 * y0
-  }
-  return Math.abs(a) / 2
 }
