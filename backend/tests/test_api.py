@@ -18,9 +18,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import library  # noqa: E402
+from app import library, main, outline, segment  # noqa: E402
 from app.config import DATA_DIR  # noqa: E402
 from app.gridfinity import BinConfig, build_bin  # noqa: E402
+from app.imageio import decode_image  # noqa: E402
 from app.main import MAX_UPLOAD_BYTES, app  # noqa: E402
 from tests.synth import make_photo  # noqa: E402
 
@@ -363,23 +364,216 @@ def test_retention_sweep(client):
     blank_old = client.post("/api/library/new", json={"name": "New bin"}).json()["project_id"]
     _set_times(blank_old, now - 2 * day)
     blank_new = client.post("/api/library/new", json={"name": "New bin"}).json()["project_id"]
-    legacy = DATA_DIR / "rect_0123456789ab.png"
-    legacy.write_bytes(b"x")
-    os.utime(legacy, (now - 8 * day, now - 8 * day))
-    legacy_fresh = DATA_DIR / "upload_0123456789ab.png"
-    legacy_fresh.write_bytes(b"x")
+    orphan = library.LIB_DIR / "0123456789ab"  # folder without a row, e.g. a crash mid-delete
+    orphan.mkdir()
+    os.utime(orphan, (now - 8 * day, now - 8 * day))
 
     removed = library.sweep(now)
-    assert (
-        removed["expired_projects"] >= 1 and removed["blank_projects"] >= 1 and removed["orphan_files"] == 1
-    )
+    assert removed["expired_projects"] >= 1 and removed["blank_projects"] >= 1 and removed["orphan_dirs"] == 1
     ids = {p["id"] for p in client.get("/api/library").json()["projects"]}
     assert old not in ids and blank_old not in ids
     assert fresh in ids and blank_new in ids
     assert not library.project_dir(old).exists()
     assert library.project_dir(fresh).exists()
-    assert not legacy.exists() and legacy_fresh.exists()
-    legacy_fresh.unlink()
+    assert not orphan.exists()
+
+
+def test_sweep_spares_a_project_touched_meanwhile(client):
+    """The sweep snapshots updated_at, then deletes; a touch in between must win."""
+    pid = client.post("/api/library/new", json={"name": "opened just now"}).json()["project_id"]
+    client.post(f"/api/library/{pid}/state", json={"bin": BIN})
+    stale = time.time() - 91 * 86400
+    _set_times(pid, stale)
+    assert library.touch(pid) is not None  # user opens it while the sweep runs
+    assert library.delete_project(pid, if_updated_at=stale) is False
+    assert client.get(f"/api/library/{pid}").status_code == 200
+    assert library.delete_project(pid) is True
+
+
+def test_writes_into_deleted_project_are_clean_errors(client):
+    pid = client.post("/api/library/new", json={"name": "gone"}).json()["project_id"]
+    assert client.delete(f"/api/library/{pid}").status_code == 200
+    with pytest.raises(KeyError):
+        library.save_state(pid, {"a": 1})
+    with pytest.raises(KeyError):
+        library.save_snapshot(pid, b"\x89PNG")
+    with pytest.raises(KeyError):
+        library.add_export(pid, "stl", "x.stl", b"solid", "")
+    assert not library.project_dir(pid).exists()  # nothing resurrected the folder
+
+
+# ------------------------------------------------------------------ regressions from the review
+def test_polygon_coordinates_must_be_finite_and_bounded(client):
+    base = {"polygon": [[0, 0], [50, 0], [50, 20], [0, 20]]}
+    for bad in (b"NaN", b"Infinity", b"-Infinity", b"1e6"):
+        body = b'{"polygon": [[' + bad + b",0],[50,0],[50,20],[0,20]]}"
+        r = client.post("/api/polygon/offset", content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 422, (bad, r.status_code, r.text[:100])
+        pocket = b'{"bin": {}, "pockets": [{"polygon": [[' + bad + b",0],[50,0],[50,20],[0,20]]}]}"
+        assert (
+            client.post(
+                "/api/generate", content=pocket, headers={"content-type": "application/json"}
+            ).status_code
+            == 422
+        )
+    r = client.post(
+        "/api/rectify",
+        content=b'{"image_id": "0123456789ab", "corners": [[NaN,0],[1,0],[1,1],[0,1]]}',
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 422
+    assert client.post("/api/polygon/offset", json=base).status_code == 200
+
+
+def test_gaussian_smooth_is_bounded_in_memory():
+    """A polygon with a 400 km perimeter used to allocate n = perimeter / 0.25 mm sample points."""
+    t = time.time()
+    out = outline.gaussian_smooth([[0, 0], [1e5, 0], [1e5, 1e5], [0, 1e5]], 1.0)
+    assert time.time() - t < 2.0
+    assert len(out) <= outline.MAX_RESAMPLE_POINTS
+
+
+def test_chunked_body_without_content_length_is_capped(client):
+    big = (
+        b'{"polygon": [[0,0],[50,0],[50,20],[0,20]], "junk": "' + b"a" * (main.MAX_JSON_BYTES + 1024) + b'"}'
+    )
+
+    def chunks():
+        for i in range(0, len(big), 65536):
+            yield big[i : i + 65536]
+
+    r = client.post("/api/polygon/offset", content=chunks(), headers={"content-type": "application/json"})
+    assert r.status_code == 413, (r.status_code, r.text[:100])
+    assert "too big" in r.json()["detail"]
+    r = client.post("/api/generate", content=chunks(), headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    pid = client.post("/api/library/new", json={"name": "chunked"}).json()["project_id"]
+    r = client.post(
+        f"/api/library/{pid}/state", content=chunks(), headers={"content-type": "application/json"}
+    )
+    assert r.status_code == 413
+
+
+def test_state_nesting_depth_is_guarded(client):
+    pid = client.post("/api/library/new", json={"name": "deep"}).json()["project_id"]
+    deep = b'{"a":' + b"[" * 5000 + b"]" * 5000 + b"}"
+    r = client.post(f"/api/library/{pid}/state", content=deep, headers={"content-type": "application/json"})
+    assert r.status_code == 400 and "deep" in r.json()["detail"]
+    r = client.post(
+        "/api/generate",
+        content=b'{"bin": {}, "project_id": "' + pid.encode() + b'", "save": true, "state": ' + deep + b"}",
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 400
+    # a state.json that got deep by other means must not make the project unopenable
+    (library.project_dir(pid) / "state.json").write_bytes(deep)
+    r = client.get(f"/api/library/{pid}")
+    assert r.status_code == 200 and r.json()["state"] is None
+    assert client.post(f"/api/library/{pid}/state", json={"a": [[[1]]]}).status_code == 200
+    assert client.get(f"/api/library/{pid}").json()["state"] == {"a": [[[1]]]}
+
+
+def test_reordered_corners_are_accepted(client):
+    up = client.post(
+        "/api/upload",
+        files={"file": ("p.png", _png_bytes(800, 600), "image/png")},
+        data={"paper_size": "letter"},
+    )
+    assert up.status_code == 200, up.text
+    iid = up.json()["image_id"]
+    for order in (
+        [[100, 100], [700, 100], [700, 500], [100, 500]],
+        [[100, 100], [700, 500], [700, 100], [100, 500]],
+    ):
+        r = client.post("/api/rectify", json={"image_id": iid, "paper": "letter", "corners": order})
+        assert r.status_code == 200, (order, r.text)
+    # still rejected: collinear, duplicate-point, tiny
+    for bad in (
+        [[100, 100], [400, 100], [700, 100], [100, 500]],
+        [[100, 100], [100, 100], [700, 100], [700, 500]],
+        [[5, 5], [6, 5], [6, 6], [5, 6]],
+    ):
+        assert (
+            client.post("/api/rectify", json={"image_id": iid, "paper": "letter", "corners": bad}).status_code
+            == 400
+        )
+
+
+def test_16bit_grayscale_png_keeps_its_gradient():
+    from PIL import Image
+
+    ramp = np.linspace(0, 65535, 256).astype(np.uint16)[None, :].repeat(8, 0)
+    buf = io.BytesIO()
+    Image.fromarray(ramp).save(buf, format="PNG")  # uint16 -> mode "I;16"
+    img = decode_image(buf.getvalue(), 3000)
+    assert img.shape == (8, 256, 3)
+    assert len(np.unique(img)) > 200 and img[0, 0, 0] == 0 and img[0, -1, 0] == 255
+
+
+def test_upload_validates_paper_size_and_custom_cap(client):
+    r = client.post(
+        "/api/upload", files={"file": ("p.png", _png_bytes(), "image/png")}, data={"paper_size": "../../../x"}
+    )
+    assert r.status_code == 400 and "paper size" in r.json()["detail"]
+    r = client.post(
+        "/api/upload",
+        files={"file": ("p.png", _png_bytes(), "image/png")},
+        data={"paper_size": "custom", "custom_w_mm": "1500", "custom_h_mm": "300"},
+    )
+    assert r.status_code == 422
+    r = client.post(
+        "/api/rectify",
+        json={
+            "image_id": "0123456789ab",
+            "paper": "custom",
+            "custom_w_mm": 1500,
+            "custom_h_mm": 300,
+            "corners": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_clicked_components_needs_a_positive_hit():
+    a = np.zeros((10, 10), bool)
+    a[1:4, 1:4] = True
+    b = np.zeros((10, 10), bool)
+    b[6:9, 6:9] = True
+    assert segment.clicked_components([a, b], [(2, 2)]) == [a]
+    assert segment.clicked_components([a, b], []) == []  # only "remove" points: no tool, no guess
+    assert segment.clicked_components([a, b], [(1e5, 1e5), (-1, 2)]) == []  # off-image clicks never hit
+    assert len(segment.clicked_components([a, b], [(2, 2), (7, 7)])) == 2
+
+
+def test_infer_pool_backlog_answers_503(client, monkeypatch):
+    monkeypatch.setattr(main, "INFER_MAX_PENDING", 0)
+    r = client.post(
+        "/api/upload", files={"file": ("p.png", _png_bytes(), "image/png")}, data={"paper_size": "letter"}
+    )
+    assert r.status_code == 503 and "busy" in r.json()["detail"]
+
+
+def test_recycled_cad_pool_answers_503(client, monkeypatch):
+    from concurrent.futures.process import BrokenProcessPool
+
+    async def broken(*_a):
+        raise BrokenProcessPool("pool was reset by another request's timeout")
+
+    monkeypatch.setattr(main, "_run_cad", broken)
+    r = client.post("/api/generate", json={"bin": {**BIN, "height_units": 19}, "pockets": []})  # not cached
+    assert r.status_code == 503 and "busy" in r.json()["detail"]
+
+
+def test_preview_cache_is_capped_by_total_bytes():
+    cache = main._LruBytes(entries=10, max_item=100, max_total=250)
+    for i in range(4):
+        cache.put(str(i), b"x" * 100)
+    assert cache.get("0") is None and cache.get("1") is None  # evicted to stay under 250 bytes
+    assert cache.get("2") is not None and cache.get("3") is not None
+    cache.put("2", b"y" * 50)  # replacing an entry accounts for the old size
+    assert cache._total == 150
+    cache.put("big", b"z" * 101)  # over max_item: ignored
+    assert cache.get("big") is None
 
 
 def test_every_id_route_binds_its_own_param(client):

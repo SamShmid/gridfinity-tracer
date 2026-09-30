@@ -12,14 +12,22 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from .config import CUSTOM_PAPER_MAX_MM
+
 # Every id the server hands out is 12 lowercase hex chars (uuid4().hex[:12]). Anything else is
 # rejected before it can reach the filesystem.
 ID_PATTERN = r"^[0-9a-f]{12}$"
 IdStr = Annotated[str, StringConstraints(pattern=ID_PATTERN)]
 
-Point = tuple[float, float]
-Poly = Annotated[list[Point], Field(min_length=3, max_length=20000)]
-Quad = Annotated[list[Point], Field(min_length=4, max_length=4)]
+Point = tuple[float, float]  # responses
+# Request coordinates (photo px or mm) must be finite and sane: NaN/inf would 500 in the JSON
+# encoder, and a 1e6 mm polygon makes the Gaussian resampler allocate gigabytes.
+COORD_LIMIT = 1e5
+Coord = Annotated[float, Field(ge=-COORD_LIMIT, le=COORD_LIMIT, allow_inf_nan=False)]
+PointIn = tuple[Coord, Coord]
+Poly = Annotated[list[PointIn], Field(min_length=3, max_length=20000)]
+Quad = Annotated[list[PointIn], Field(min_length=4, max_length=4)]
+CustomMM = Annotated[float | None, Field(ge=20, le=CUSTOM_PAPER_MAX_MM)]
 Name = Annotated[
     str, StringConstraints(max_length=2000)
 ]  # handlers truncate to 120; a long name is not an error
@@ -39,8 +47,8 @@ class RectifyRequest(BaseModel):
     image_id: IdStr
     corners: Quad
     paper: Annotated[str, StringConstraints(max_length=20)] = "letter"  # key in PAPER_SIZES or "custom"
-    custom_w_mm: float | None = Field(None, ge=20, le=2000)
-    custom_h_mm: float | None = Field(None, ge=20, le=2000)
+    custom_w_mm: CustomMM = None
+    custom_h_mm: CustomMM = None
     orientation: Literal["auto", "landscape", "portrait"] = "auto"
 
 

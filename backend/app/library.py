@@ -12,9 +12,12 @@ Layout under DATA_DIR/library/<project_id>/:
 Every id is 12 lowercase hex chars. project_dir() refuses anything else, so no path built here can
 ever leave LIB_DIR (the old code let `DELETE /api/library/..` wipe the data volume).
 
+Every write (file + row) happens under one process-wide lock, so a delete can never interleave with
+a save into the same folder.
+
 Retention (owner's choice): projects untouched for RETENTION_DAYS are deleted, blank projects
-(no photo, no state, no exports, no snapshot) after BLANK_DAYS, orphan image files after ORPHAN_DAYS.
-sweep() does the work; main.py runs it at startup and every 24 h.
+(no photo, no state, no exports, no snapshot) after BLANK_DAYS, orphan project folders after
+ORPHAN_DAYS. sweep() does the work; main.py runs it at startup and every 24 h.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ from pathlib import Path
 from .config import DATA_DIR
 
 log = logging.getLogger("gridfinity-tracer.library")
+# state.json is echoed back through FastAPI's recursive encoder; deeper than this and a GET 500s.
+MAX_STATE_DEPTH = 64
 
 LIB_DIR = DATA_DIR / "library"
 DB_PATH = DATA_DIR / "library.db"
@@ -61,38 +66,37 @@ def check_id(value: str) -> str:
     return value
 
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    c.execute("PRAGMA busy_timeout=5000")
-    return c
-
-
+@contextlib.contextmanager
 def _db():
-    """`with _db() as c:` -> locked, auto-committing, auto-closing connection."""
-    return _Db()
-
-
-class _Db:
-    def __enter__(self) -> sqlite3.Connection:
-        _lock.acquire()
+    """`with _db() as c:` -> locked, auto-committing (or rolling back), auto-closing connection."""
+    with _lock:
+        c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)  # timeout == busy_timeout
+        c.row_factory = sqlite3.Row
         try:
-            self._c = _conn()
-            self._c.__enter__()
-        except BaseException:
-            _lock.release()
-            raise
-        return self._c
-
-    def __exit__(self, *exc):
-        try:
-            self._c.__exit__(*exc)  # commit or roll back
+            c.execute("PRAGMA foreign_keys=ON")
+            with c:
+                yield c
         finally:
-            with contextlib.suppress(Exception):
-                self._c.close()
-            _lock.release()
-        return False
+            c.close()
+
+
+def _exists(c: sqlite3.Connection, pid: str) -> bool:
+    return c.execute("SELECT 1 FROM projects WHERE id=?", (pid,)).fetchone() is not None
+
+
+def json_depth(obj, limit: int) -> int:
+    """Nesting depth of decoded JSON, stopping early once it exceeds `limit` (iterative: no recursion)."""
+    depth, stack = 0, [(obj, 1)]
+    while stack:
+        o, d = stack.pop()
+        depth = max(depth, d)
+        if depth > limit:
+            break
+        if isinstance(o, dict):
+            stack.extend((v, d + 1) for v in o.values())
+        elif isinstance(o, list):
+            stack.extend((v, d + 1) for v in o)
+    return depth
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -144,30 +148,6 @@ def init() -> None:
             CREATE INDEX IF NOT EXISTS images_project ON images(project_id);
             """
         )
-    _migrate_root_uploads()
-
-
-def _migrate_root_uploads() -> None:
-    """Older versions kept upload_<id>.png in DATA_DIR. Move the ones we can attribute to a project
-    into that project's folder; the rest (rect_* files have no owner) are swept after ORPHAN_DAYS."""
-    with _db() as c:
-        rows = c.execute(
-            "SELECT p.id, p.image_id FROM projects p WHERE p.image_id != '' "
-            "AND NOT EXISTS (SELECT 1 FROM images i WHERE i.id = p.image_id)"
-        ).fetchall()
-    for r in rows:
-        try:
-            check_id(r["image_id"])
-            src = DATA_DIR / f"upload_{r['image_id']}.png"
-            if not src.exists():
-                continue
-            dst = project_dir(r["id"]) / src.name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-            register_image(r["id"], r["image_id"], "upload")
-            log.info("migrated %s into project %s", src.name, r["id"])
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not migrate upload %s: %s", r["image_id"], e)
 
 
 def project_dir(pid: str) -> Path:
@@ -245,26 +225,31 @@ def touch(pid: str) -> float | None:
 
 
 def save_snapshot(pid: str, png: bytes) -> None:
+    """Raises KeyError if the project is gone."""
     d = project_dir(pid)
-    if get_project(pid) is None or not d.exists():
-        raise KeyError(pid)
-    _atomic_write(d / "snapshot.png", png)
-    with _db() as c:
+    with _db() as c:  # the write sits inside the lock so delete_project cannot pull the folder away
+        if not _exists(c, pid) or not d.exists():
+            raise KeyError(pid)
+        _atomic_write(d / "snapshot.png", png)
         _touch_row(c, pid)
 
 
 def save_state(pid: str, state: dict) -> None:
+    """Raises KeyError if the project is gone, ValueError if the state nests deeper than MAX_STATE_DEPTH
+    (FastAPI's encoder recurses over it on GET, and a RecursionError there would brick the project)."""
+    if json_depth(state, MAX_STATE_DEPTH) > MAX_STATE_DEPTH:
+        raise ValueError(f"state nests deeper than {MAX_STATE_DEPTH} levels")
     d = project_dir(pid)
-    if get_project(pid) is None or not d.exists():
-        raise KeyError(pid)
-    _atomic_write(d / "state.json", json.dumps(state).encode())
     with _db() as c:
+        if not _exists(c, pid) or not d.exists():
+            raise KeyError(pid)
+        _atomic_write(d / "state.json", json.dumps(state).encode())
         _touch_row(c, pid)
 
 
 def load_state(pid: str) -> dict | None:
-    """The saved state, or None when there is none or the file is unreadable (a corrupt state.json
-    must not make the project unopenable)."""
+    """The saved state, or None when there is none or the file is unreadable / too deeply nested
+    (a corrupt state.json must not make the project unopenable)."""
     p = project_dir(pid) / "state.json"
     if not p.exists():
         return None
@@ -273,20 +258,24 @@ def load_state(pid: str) -> dict | None:
     except (OSError, ValueError) as e:
         log.warning("state.json for %s is corrupt (%s); ignoring it", pid, e)
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict) or json_depth(data, MAX_STATE_DEPTH) > MAX_STATE_DEPTH:
+        log.warning("state.json for %s is not a sane object; ignoring it", pid)
+        return None
+    return data
 
 
 def add_export(pid: str, fmt: str, filename: str, data: bytes, summary: str = "") -> str:
+    """Raises KeyError if the project is gone."""
     d = project_dir(pid)
-    if get_project(pid) is None or not d.exists():
-        raise KeyError(pid)
     if fmt not in ("stl", "3mf", "step"):
         raise ValueError(fmt)
     eid = new_id()
-    (d / "exports").mkdir(exist_ok=True)
-    _atomic_write(d / "exports" / f"{eid}.{fmt}", data)
     now = time.time()
     with _db() as c:
+        if not _exists(c, pid) or not d.exists():
+            raise KeyError(pid)
+        (d / "exports").mkdir(exist_ok=True)
+        _atomic_write(d / "exports" / f"{eid}.{fmt}", data)
         c.execute(
             "INSERT INTO exports (id, project_id, created_at, format, filename, size, summary) VALUES (?,?,?,?,?,?,?)",
             (eid, pid, now, fmt, filename, len(data), summary),
@@ -343,15 +332,20 @@ def rename(pid: str, name: str, notes: str | None = None) -> bool:
     return cur.rowcount > 0
 
 
-def delete_project(pid: str) -> bool:
-    """Delete the row (exports and images cascade) and then the folder. Returns False if no such project;
-    nothing on disk is touched in that case."""
+def delete_project(pid: str, if_updated_at: float | None = None) -> bool:
+    """Delete the row (exports and images cascade) and then the folder, both under the lock. Returns
+    False if no such project (nothing on disk is touched) or, with if_updated_at, if the project was
+    touched since that timestamp was read (the retention sweep must not delete a project someone
+    just opened)."""
     d = project_dir(pid)
     with _db() as c:
-        cur = c.execute("DELETE FROM projects WHERE id=?", (pid,))
+        if if_updated_at is None:
+            cur = c.execute("DELETE FROM projects WHERE id=?", (pid,))
+        else:
+            cur = c.execute("DELETE FROM projects WHERE id=? AND updated_at=?", (pid, if_updated_at))
         if cur.rowcount == 0:
             return False
-    shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d, ignore_errors=True)
     return True
 
 
@@ -386,19 +380,15 @@ def image_project(image_id: str) -> str | None:
 
 
 def image_path(kind: str, image_id: str, suffix: str = ".png") -> Path | None:
-    """Where `<kind>_<id><suffix>` lives, or None if unknown. Falls back to the legacy DATA_DIR root
-    location for files written by older versions (those are swept after ORPHAN_DAYS)."""
+    """Where `<kind>_<id><suffix>` lives, or None if unknown."""
     if kind not in IMAGE_KINDS:
         raise ValueError(kind)
     check_id(image_id)
-    name = f"{kind}_{image_id}{suffix}"
     pid = image_project(image_id)
-    if pid is not None:
-        p = project_dir(pid) / name
-        if p.exists():
-            return p
-    legacy = DATA_DIR / name
-    return legacy if legacy.exists() else None
+    if pid is None:
+        return None
+    p = project_dir(pid) / f"{kind}_{image_id}{suffix}"
+    return p if p.exists() else None
 
 
 def new_image_path(kind: str, pid: str, image_id: str, suffix: str = ".png") -> Path:
@@ -423,9 +413,6 @@ def read_json(path: Path) -> dict | None:
 
 
 # ------------------------------------------------------------------ retention
-_LEGACY_RE = re.compile(r"^(upload|rect)_[0-9a-f]{12}\.(png|json)$")
-
-
 def _mtime(p: Path) -> float:
     try:
         return p.stat().st_mtime
@@ -434,11 +421,11 @@ def _mtime(p: Path) -> float:
 
 
 def sweep(now: float | None = None) -> dict:
-    """Delete (a) legacy/orphan image files and orphan project folders older than ORPHAN_DAYS,
-    (b) projects not updated for RETENTION_DAYS, (c) blank projects older than BLANK_DAYS.
-    Returns counts; logs every removal."""
+    """Delete (a) projects not updated for RETENTION_DAYS, (b) blank projects older than BLANK_DAYS,
+    (c) orphan project folders older than ORPHAN_DAYS. Returns counts; logs every removal.
+    A project touched between the snapshot read and the delete is left alone (delete_project's guard)."""
     now = time.time() if now is None else now
-    removed = {"expired_projects": 0, "blank_projects": 0, "orphan_files": 0, "orphan_dirs": 0}
+    removed = {"expired_projects": 0, "blank_projects": 0, "orphan_dirs": 0}
 
     with _db() as c:
         projects = c.execute("SELECT * FROM projects").fetchall()
@@ -453,7 +440,7 @@ def sweep(now: float | None = None) -> dict:
         pd = project_dir(pid)
         age_days = (now - p["updated_at"]) / DAY
         if age_days > RETENTION_DAYS:
-            if delete_project(pid):
+            if delete_project(pid, if_updated_at=p["updated_at"]):
                 removed["expired_projects"] += 1
                 log.info(
                     "retention: deleted project %s (%r), last updated %.0f days ago", pid, p["name"], age_days
@@ -466,19 +453,12 @@ def sweep(now: float | None = None) -> dict:
             and not (pd / "snapshot.png").exists()
         )
         if blank and (now - p["created_at"]) / DAY > BLANK_DAYS:
-            if delete_project(pid):
+            if delete_project(pid, if_updated_at=p["updated_at"]):
                 removed["blank_projects"] += 1
                 log.info("retention: deleted blank project %s (%r)", pid, p["name"])
 
     cutoff = now - ORPHAN_DAYS * DAY
-    # legacy files in the DATA_DIR root (older versions wrote upload_/rect_ files there)
-    for f in DATA_DIR.iterdir() if DATA_DIR.exists() else []:
-        if f.is_file() and _LEGACY_RE.match(f.name) and _mtime(f) < cutoff:
-            with contextlib.suppress(OSError):
-                f.unlink()
-                removed["orphan_files"] += 1
-                log.info("retention: deleted orphan file %s", f.name)
-    # project folders without a row (e.g. a crash between rmtree and the DB delete, or manual edits)
+    # project folders without a row (e.g. a crash between the DB delete and rmtree, or manual edits)
     for d in LIB_DIR.iterdir() if LIB_DIR.exists() else []:
         if d.is_dir() and d.name not in known and _ID_RE.match(d.name) and _mtime(d) < cutoff:
             shutil.rmtree(d, ignore_errors=True)

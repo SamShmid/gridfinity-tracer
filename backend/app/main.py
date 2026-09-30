@@ -2,12 +2,14 @@
 
 One container serves every browser on the local network, so the endpoints are kept synchronous
 but the heavy work is fenced off:
-  * model inference (paper detection, IS-Net, SAM) runs in a 2-thread pool with a 60 s timeout,
+  * model inference (paper detection, IS-Net, SAM) runs in a 2-thread pool with a 60 s timeout. A
+    thread cannot be killed, so a timed-out job keeps running to completion; the pool therefore
+    refuses new work with a 503 once INFER_MAX_PENDING jobs are running or queued,
   * CAD (build123d / OpenCascade) runs in a 2-process pool with a 120 s timeout, so a pathological
     boolean can neither block the event loop nor hold the GIL; on timeout the pool is recycled,
-  * generated model bytes are cached by request hash (32 entries) so repeated previews are instant,
-  * every id is validated, every body is size-capped, every numeric field is bounded (schemas.py),
-    and anything unexpected becomes a clean JSON 500 without a stack trace.
+  * generated model bytes are cached by request hash (32 entries, 128 MB) so repeated previews are instant,
+  * every id is validated, every body is size-capped as it streams in, every numeric field is bounded
+    (schemas.py), and anything unexpected becomes a clean JSON 500 without a stack trace.
 
 Run with a single uvicorn worker: the SAM embedding cache, the preview cache and the pools live in
 this process. Scale by CPU inside the pools, not by workers.
@@ -25,19 +27,21 @@ import os
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Annotated
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi import Path as PathParam  # noqa: F401
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import StringConstraints
+from starlette.datastructures import MutableHeaders
 
 from . import gridfinity, library, outline, paper, segment
-from .config import DATA_DIR, MAX_UPLOAD_SIDE, MODELS_DIR, PAPER_SIZES, STATIC_DIR
+from .config import CUSTOM_PAPER_MAX_MM, DATA_DIR, MAX_UPLOAD_SIDE, MODELS_DIR, PAPER_SIZES, STATIC_DIR
 from .imageio import MAX_PIXELS, ImageTooLarge, decode_image
 from .schemas import (
     ID_PATTERN,
@@ -68,20 +72,23 @@ MAX_UPLOAD_BYTES = int(os.environ.get("GT_MAX_UPLOAD_MB", "50")) * MB
 MAX_SNAPSHOT_BYTES = 3 * MB
 MAX_JSON_BYTES = 2 * MB
 INFER_TIMEOUT_S = float(os.environ.get("GT_INFER_TIMEOUT_S", "60"))
+INFER_MAX_PENDING = int(os.environ.get("GT_INFER_MAX_PENDING", "6"))  # running + queued inference jobs
 CAD_TIMEOUT_S = float(os.environ.get("GT_CAD_TIMEOUT_S", "120"))
 SWEEP_INTERVAL_S = 24 * 3600
 PREVIEW_CACHE_ENTRIES = 32
 PREVIEW_CACHE_MAX_ITEM = 24 * MB
+PREVIEW_CACHE_MAX_TOTAL = 128 * MB
 
 MEDIA = {"stl": "model/stl", "3mf": "model/3mf", "step": "application/step"}
-# Annotated (not a shared default instance): FastAPI copies the FieldInfo per parameter.
-# A pydantic string constraint (NOT a shared fastapi Path() instance: FastAPI binds the alias of a
-# single Path() object to the first parameter name that used it, breaking every other route).
+# Path ids: a pydantic constraint in an Annotated alias, which FastAPI copies per parameter.
 IdP = Annotated[str, StringConstraints(pattern=ID_PATTERN)]
+BUSY = "The server is busy with other requests right now. Wait a moment and try again."
 
 
 # ------------------------------------------------------------------ executors
 _infer_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="infer")
+_infer_pending = 0  # jobs submitted and not yet finished (a timed-out job still counts until it ends)
+_infer_lock = threading.Lock()
 _cad_pool: ProcessPoolExecutor | None = None
 _cad_lock = threading.Lock()
 
@@ -123,14 +130,31 @@ def _shutdown_pools() -> None:
         old.shutdown(wait=False, cancel_futures=True)
 
 
+def _infer_done(_fut: Future) -> None:
+    global _infer_pending
+    with _infer_lock:
+        _infer_pending -= 1
+
+
 async def _run_infer(fn, *args):
-    loop = asyncio.get_running_loop()
+    """Run fn in the inference pool. 503 when the pool is saturated (a Python thread cannot be
+    interrupted, so a job that times out below keeps the slot until it finishes on its own)."""
+    global _infer_pending
+    with _infer_lock:
+        if _infer_pending >= INFER_MAX_PENDING:
+            raise HTTPException(503, BUSY)
+        _infer_pending += 1
+    fut = _infer_pool.submit(fn, *args)
+    fut.add_done_callback(_infer_done)
     try:
-        return await asyncio.wait_for(loop.run_in_executor(_infer_pool, fn, *args), INFER_TIMEOUT_S)
+        return await asyncio.wait_for(
+            asyncio.wrap_future(fut, loop=asyncio.get_running_loop()), INFER_TIMEOUT_S
+        )
     except TimeoutError:
         raise HTTPException(
             504,
-            f"That took too long (over {INFER_TIMEOUT_S:.0f} s). The server is probably busy, try again in a moment.",
+            f"That took over {INFER_TIMEOUT_S:.0f} s and was abandoned. The server may still be finishing it "
+            "in the background; wait a little before trying again.",
         ) from None
 
 
@@ -149,9 +173,12 @@ async def _run_cad(fn, *args):
 
 # ------------------------------------------------------------------ preview cache
 class _LruBytes:
-    def __init__(self, entries: int, max_item: int):
+    """LRU of byte blobs bounded by entry count AND total bytes (32 x 24 MB STLs would be 768 MB)."""
+
+    def __init__(self, entries: int, max_item: int, max_total: int):
         self._d: OrderedDict[str, bytes] = OrderedDict()
-        self._n, self._max_item = entries, max_item
+        self._n, self._max_item, self._max_total = entries, max_item, max_total
+        self._total = 0
         self._lock = threading.Lock()
 
     def get(self, key: str) -> bytes | None:
@@ -165,13 +192,16 @@ class _LruBytes:
         if len(value) > self._max_item:
             return
         with self._lock:
+            old = self._d.pop(key, None)
+            self._total -= len(old) if old is not None else 0
             self._d[key] = value
-            self._d.move_to_end(key)
-            while len(self._d) > self._n:
-                self._d.popitem(last=False)
+            self._total += len(value)
+            while len(self._d) > self._n or self._total > self._max_total:
+                _, evicted = self._d.popitem(last=False)
+                self._total -= len(evicted)
 
 
-_preview_cache = _LruBytes(PREVIEW_CACHE_ENTRIES, PREVIEW_CACHE_MAX_ITEM)
+_preview_cache = _LruBytes(PREVIEW_CACHE_ENTRIES, PREVIEW_CACHE_MAX_ITEM, PREVIEW_CACHE_MAX_TOTAL)
 
 
 # ------------------------------------------------------------------ app
@@ -221,6 +251,14 @@ async def _bad_id(request: Request, exc: library.BadId):
     return JSONResponse({"detail": "Not found."}, status_code=404)
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation(request: Request, exc: RequestValidationError):
+    """Same shape as FastAPI's default 422 minus the echoed input: echoing NaN/inf back would make the
+    JSON encoder raise and turn a bad request into a 500."""
+    errors = [{k: v for k, v in e.items() if k in ("loc", "msg", "type")} for e in exc.errors()]
+    return JSONResponse({"detail": errors}, status_code=422)
+
+
 def _body_limit(path: str) -> int:
     if path == "/api/upload":
         return MAX_UPLOAD_BYTES
@@ -229,23 +267,59 @@ def _body_limit(path: str) -> int:
     return MAX_JSON_BYTES
 
 
-@app.middleware("http")
-async def _limits_and_cache_headers(request: Request, call_next):
-    path = request.url.path
-    if path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH"):
-        cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > _body_limit(path):
-            return JSONResponse(
-                {"detail": f"That request is too big (max {_body_limit(path) // MB} MB)."}, status_code=413
-            )
-    resp = await call_next(request)
-    # index.html must never be cached (it references hashed asset names that change on every build);
-    # the hashed assets themselves can be cached forever.
-    if path.startswith("/assets/"):
-        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-    elif not path.startswith("/api/"):
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    return resp
+def _too_big(limit: int) -> str:
+    return f"That request is too big (max {limit // MB} MB)."
+
+
+class _LimitsAndCacheHeaders:
+    """Pure ASGI middleware (BaseHTTPMiddleware cannot wrap `receive`): caps every /api write body as it
+    streams in, so a chunked request without Content-Length is capped too, and sets cache headers."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path = scope["path"]
+        if path.startswith("/api/") and scope["method"] in ("POST", "PUT", "PATCH"):
+            limit = _body_limit(path)
+            cl = dict(scope["headers"]).get(b"content-length", b"")
+            if cl.isdigit() and int(cl) > limit:
+                return await JSONResponse({"detail": _too_big(limit)}, status_code=413)(scope, receive, send)
+            receive = _counting_receive(receive, limit)
+
+        async def send_with_cache(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                # index.html must never be cached (it references hashed asset names that change on
+                # every build); the hashed assets themselves can be cached forever.
+                if path.startswith("/assets/"):
+                    headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                elif not path.startswith("/api/"):
+                    headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            await send(message)
+
+        await self.app(scope, receive, send_with_cache)
+
+
+def _counting_receive(receive, limit: int):
+    received = 0
+
+    async def counting():
+        nonlocal received
+        message = await receive()
+        if message["type"] == "http.request":
+            received += len(message.get("body", b""))
+            if received > limit:
+                # Raised inside FastAPI's body read, which re-raises HTTPException untouched -> JSON 413.
+                raise HTTPException(413, _too_big(limit))
+        return message
+
+    return counting
+
+
+app.add_middleware(_LimitsAndCacheHeaders)
 
 
 async def _read_limited(file: UploadFile, limit: int, what: str) -> bytes:
@@ -271,7 +345,7 @@ async def _read_json_body(request: Request, limit: int = MAX_JSON_BYTES) -> dict
 
 
 # ------------------------------------------------------------------ image helpers
-_meta: OrderedDict[str, dict] = OrderedDict()
+_rect_meta_cache: OrderedDict[str, dict] = OrderedDict()  # rect_id -> meta, LRU of 256
 _meta_lock = threading.Lock()
 
 
@@ -292,17 +366,24 @@ def _load(kind: str, id_: str) -> np.ndarray:
 
 def _rect_meta(rect_id: str) -> dict:
     with _meta_lock:
-        m = _meta.get(rect_id)
+        m = _rect_meta_cache.get(rect_id)
+        if m is not None:
+            _rect_meta_cache.move_to_end(rect_id)
+            return m
+    p = library.image_path("rect", rect_id, ".json")
+    m = library.read_json(p) if p else None
     if m is None:
-        p = library.image_path("rect", rect_id, ".json")
-        m = library.read_json(p) if p else None
-        if m is None:
-            raise HTTPException(404, "That rectified image is no longer available. Rectify the photo again.")
-        with _meta_lock:
-            _meta[rect_id] = m
-            while len(_meta) > 256:
-                _meta.popitem(last=False)
+        raise HTTPException(404, "That rectified image is no longer available. Rectify the photo again.")
+    _remember_meta(rect_id, m)
     return m
+
+
+def _remember_meta(rect_id: str, meta: dict) -> None:
+    with _meta_lock:
+        _rect_meta_cache[rect_id] = meta
+        _rect_meta_cache.move_to_end(rect_id)
+        while len(_rect_meta_cache) > 256:
+            _rect_meta_cache.popitem(last=False)
 
 
 def _outline_list(
@@ -342,11 +423,13 @@ def paper_sizes():
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload(
     file: UploadFile = File(...),
-    paper_size: str = Form("letter"),
-    custom_w_mm: float | None = Form(None, ge=20, le=2000),
-    custom_h_mm: float | None = Form(None, ge=20, le=2000),
+    paper_size: str = Form("letter", max_length=20),
+    custom_w_mm: float | None = Form(None, ge=20, le=CUSTOM_PAPER_MAX_MM),
+    custom_h_mm: float | None = Form(None, ge=20, le=CUSTOM_PAPER_MAX_MM),
     name: str | None = Form(None, max_length=120),
 ):
+    if paper_size not in PAPER_SIZES and paper_size != "custom":
+        raise HTTPException(400, f"Unknown paper size '{paper_size[:20]}'.")
     raw = await _read_limited(file, MAX_UPLOAD_BYTES, "file")
     if not raw:
         raise HTTPException(400, "That file is empty.")
@@ -367,7 +450,7 @@ async def upload(
         [cv2.IMWRITE_JPEG_QUALITY, 82],
     )[1].tobytes()
     project_id = library.create_project(
-        raw, Path(file.filename or "photo").name[:200], image_id, w, h, paper_size[:20], thumb
+        raw, Path(file.filename or "photo").name[:200], image_id, w, h, paper_size, thumb
     )
     cv2.imwrite(str(library.new_image_path("upload", project_id, image_id)), img)
     if name and name.strip():
@@ -410,9 +493,11 @@ def get_rect(rect_id: IdP):
 
 
 def _check_quad(corners, w: int, h: int) -> None:
-    q = np.array(corners, np.float32)
+    # Order first: rectify() reorders anyway, so a rectangle given as TL,BR,TR,BL is fine, while the
+    # area of the *unordered* bow-tie would be ~0 and wrongly rejected.
+    q = paper.order_corners(np.array(corners, np.float32))
     area = abs(cv2.contourArea(q.reshape(-1, 1, 2)))
-    if area < 100 or not cv2.isContourConvex(paper.order_corners(q).reshape(-1, 1, 2)):
+    if area < 100 or not cv2.isContourConvex(q.reshape(-1, 1, 2)):
         raise HTTPException(
             400, "Those corners don't make a usable rectangle. Drag each one onto a corner of the paper."
         )
@@ -438,8 +523,7 @@ async def rectify(req: RectifyRequest):
     _check_quad(req.corners, w, h)
     corners = [list(c) for c in req.corners]
     orient = req.orientation if req.orientation != "auto" else paper.paper_orientation(corners)
-    short, long_ = min(pw, ph), max(pw, ph)
-    w_mm, h_mm = (long_, short) if orient == "landscape" else (short, long_)
+    w_mm, h_mm = paper.sheet_size_mm((pw, ph), orient)
     try:
         warped, meta = await _run_infer(paper.rectify, img, corners, w_mm, h_mm)
     except HTTPException:
@@ -452,8 +536,7 @@ async def rectify(req: RectifyRequest):
     png = library.new_image_path("rect", pid, rect_id)
     cv2.imwrite(str(png), warped)
     library.write_json(png.with_suffix(".json"), meta)
-    with _meta_lock:
-        _meta[rect_id] = meta
+    _remember_meta(rect_id, meta)
     return RectifyResponse(
         rect_id=rect_id,
         **{
@@ -503,14 +586,10 @@ async def detect_sam(req: SamRequest):
         mask = sam.predict(
             req.rect_id, [(p.x, p.y) for p in req.points], [p.label for p in req.points], img_bgr=img
         )
-        # Keep only the component(s) that contain a positive click; SAM sometimes adds stray blobs.
         comps = segment.split_components(mask, ppm, 20.0)
-        pos = [(int(p.y), int(p.x)) for p in req.points if p.label == 1]
-        keep = [
-            c for c in comps if any(0 <= y < c.shape[0] and 0 <= x < c.shape[1] and c[y, x] for y, x in pos)
-        ]
-        if not keep and comps:
-            keep = comps[:1]
+        keep = segment.clicked_components(comps, [(p.x, p.y) for p in req.points if p.label == 1])
+        if not keep:
+            return []  # no positive click landed on anything (e.g. only "remove" points): no tool
         merged = np.zeros_like(mask)
         for c in keep:
             merged |= c
@@ -594,7 +673,10 @@ async def generate(req: GenerateRequest):
             data = await _run_cad(gridfinity.generate_model, bin_cfg, pockets, req.format, req.tolerance)
         except HTTPException:
             raise
-        except Exception as e:  # noqa: BLE001  (OpenCascade rejected the geometry, or a worker died)
+        except BrokenProcessPool:
+            # The pool was recycled under us (another request's job timed out): not this user's fault.
+            raise HTTPException(503, BUSY) from None
+        except Exception as e:  # noqa: BLE001  (OpenCascade rejected the geometry)
             log.warning("CAD generation failed: %s", e)
             raise HTTPException(
                 400,
@@ -612,6 +694,8 @@ async def generate(req: GenerateRequest):
             saved = True
         except KeyError:
             log.warning("project %s not found; export not stored", req.project_id)
+        except ValueError as e:
+            raise HTTPException(400, f"That project state can't be saved: {e}.") from None
     headers = {
         "Content-Disposition": f'attachment; filename="{name}.{req.format}"',
         "X-Saved": "1" if saved else "0",
@@ -686,6 +770,8 @@ async def library_save_state(request: Request, pid: IdP):
         library.save_state(pid, body)
     except KeyError:
         raise HTTPException(404, "Not found.") from None
+    except ValueError as e:
+        raise HTTPException(400, f"That project state can't be saved: {e}.") from None
     return {"ok": True}
 
 

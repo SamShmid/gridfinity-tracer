@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import Polygon
 from shapely.validation import make_valid
 
 PolyMM = list[list[float]]  # [[x_mm, y_mm], ...] ring, not closed
+# Upper bound on resampled contour points: 100k at 0.25 mm is a 25 m perimeter. Beyond that the
+# step grows, so a hostile polygon cannot make the Gaussian index matrix (n x 2k+1) eat memory.
+MAX_RESAMPLE_POINTS = 100_000
 
 
 def _largest_polygon(geom) -> Polygon | None:
@@ -15,9 +18,7 @@ def _largest_polygon(geom) -> Polygon | None:
         return None
     if isinstance(geom, Polygon):
         return geom
-    if isinstance(geom, MultiPolygon):
-        return max(geom.geoms, key=lambda g: g.area)
-    if hasattr(geom, "geoms"):
+    if hasattr(geom, "geoms"):  # MultiPolygon / GeometryCollection
         polys = [g for g in geom.geoms if isinstance(g, Polygon)]
         return max(polys, key=lambda g: g.area) if polys else None
     return None
@@ -165,7 +166,10 @@ def gaussian_smooth(poly: PolyMM, sigma_mm: float, step_mm: float = 0.25) -> Pol
     """
     if sigma_mm <= 0 or len(poly) < 4:
         return poly
-    pts = _resample(np.asarray(poly, float), step_mm)
+    arr = np.asarray(poly, float)
+    perimeter = float(np.linalg.norm(np.diff(np.vstack([arr, arr[:1]]), axis=0), axis=1).sum())
+    step_mm = max(step_mm, perimeter / MAX_RESAMPLE_POINTS)
+    pts = _resample(arr, step_mm)
     n = len(pts)
     k = int(np.ceil(3 * sigma_mm / step_mm))
     if k < 1:

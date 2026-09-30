@@ -55,8 +55,7 @@ def main():
             print(f"{name}: paper NOT found ({t1 - t0:.1f}s)")
             continue
         orient = paper.paper_orientation(quad)
-        pw, ph = PAPER_SIZES["letter"]
-        w_mm, h_mm = (max(pw, ph), min(pw, ph)) if orient == "landscape" else (min(pw, ph), max(pw, ph))
+        w_mm, h_mm = paper.sheet_size_mm(PAPER_SIZES["letter"], orient)
         rect, meta = paper.rectify(img, quad, w_mm, h_mm)
         ppm = meta["px_per_mm"]
         t2 = time.time()

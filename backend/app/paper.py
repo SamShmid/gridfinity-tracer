@@ -230,21 +230,23 @@ def _sam_paper_masks(small: np.ndarray, blob: np.ndarray | None) -> list[np.ndar
     key = "paper-" + str(id(small))
     sam.embed(key, small)
     out: list[np.ndarray] = []
-    for pts, labs, box in variants:
-        try:
-            masks, _ = sam.predict_all(key, pts, labs, box, small)
-        except Exception as e:  # noqa: BLE001
-            log.warning("SAM paper prompt failed: %s", e)
-            continue
-        for m in masks:
-            mm = cv2.morphologyEx(m.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
-            comp = _largest_component(mm)
-            if comp is None:
+    try:
+        for pts, labs, box in variants:
+            try:
+                masks, _ = sam.predict_all(key, pts, labs, box, small)
+            except Exception as e:  # noqa: BLE001
+                log.warning("SAM paper prompt failed: %s", e)
                 continue
-            if any(((comp > 0) ^ (o > 0)).mean() < 0.01 for o in out):
-                continue
-            out.append(comp)
-    sam.forget(key)
+            for m in masks:
+                mm = cv2.morphologyEx(m.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+                comp = _largest_component(mm)
+                if comp is None:
+                    continue
+                if any(((comp > 0) ^ (o > 0)).mean() < 0.01 for o in out):
+                    continue
+                out.append(comp)
+    finally:
+        sam.forget(key)  # the embedding cache is tiny; never leave a one-shot key in it
     return out
 
 
@@ -302,7 +304,9 @@ def _refine_quad_hough(gray: np.ndarray, quad: np.ndarray, band_frac: float = 0.
         inward = 1.0 if float((centroid - a) @ n) > 0 else -1.0
 
         lengths = [sum(c[1] for c in cl) for cl in clusters]
-        strong = [cl for cl, ln in zip(clusters, lengths) if ln >= 0.5 * max(lengths) and ln >= 0.3 * L]
+        strong = [
+            cl for cl, ln in zip(clusters, lengths, strict=True) if ln >= 0.5 * max(lengths) and ln >= 0.3 * L
+        ]
         if not strong:
             lines.append((a, u))
             continue
@@ -403,6 +407,13 @@ def paper_orientation(quad: Quad) -> str:
     top = np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])
     side = np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])
     return "landscape" if top > side else "portrait"
+
+
+def sheet_size_mm(size: tuple[float, float], orientation: str) -> tuple[float, float]:
+    """(width_mm, height_mm) of a sheet as it appears in the photo: the long side runs left-right
+    for 'landscape', top-bottom otherwise. `size` may be given in either order."""
+    short, long_ = min(size), max(size)
+    return (long_, short) if orientation == "landscape" else (short, long_)
 
 
 def rectify(

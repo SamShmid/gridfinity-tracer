@@ -28,6 +28,9 @@ PX_PER_MM = float(os.environ.get("GT_PX_PER_MM", "4"))
 RECTIFY_MARGIN_MM = float(os.environ.get("GT_RECTIFY_MARGIN_MM", "25"))
 # Longest side the uploaded photo is downscaled to before any processing.
 MAX_UPLOAD_SIDE = int(os.environ.get("GT_MAX_UPLOAD_SIDE", "3000"))
+# Largest custom sheet side. The rectified image is (side + 2 * margin) * PX_PER_MM px square, so
+# 1000 mm (covers A1) is ~4200 px = 53 MB; the old 2000 mm cap meant 200 MB per request.
+CUSTOM_PAPER_MAX_MM = float(os.environ.get("GT_CUSTOM_PAPER_MAX_MM", "1000"))
 
 # name -> (width_mm, height_mm) in portrait orientation
 PAPER_SIZES: dict[str, tuple[float, float]] = {

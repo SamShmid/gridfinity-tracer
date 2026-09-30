@@ -55,6 +55,17 @@ def split_components(
     return [m for _, m in comps]
 
 
+def clicked_components(comps: list[np.ndarray], clicks_xy: list[tuple[float, float]]) -> list[np.ndarray]:
+    """The components that contain at least one positive click (SAM sometimes adds stray blobs).
+    Off-image clicks never match, and no positive click means no tool: an empty list, not a guess."""
+    out = []
+    for c in comps:
+        h, w = c.shape
+        if any(0 <= int(y) < h and 0 <= int(x) < w and c[int(y), int(x)] for x, y in clicks_xy):
+            out.append(c)
+    return out
+
+
 # ---------------------------------------------------------------- IS-Net (rembg)
 _rembg_session = None
 _rembg_lock = threading.Lock()

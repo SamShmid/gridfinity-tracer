@@ -14,17 +14,20 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("U2NET_HOME", str(Path(__file__).resolve().parent.parent.parent / "models" / "u2net"))
 from app import outline, paper, segment  # noqa: E402
-from app.config import MAX_UPLOAD_SIDE  # noqa: E402
+from app.config import MAX_UPLOAD_SIDE, PAPER_SIZES  # noqa: E402
 from app.imageio import decode_image  # noqa: E402
 
 src, out = sys.argv[1], sys.argv[2]
 os.makedirs(out, exist_ok=True)
+LETTER = PAPER_SIZES["letter"]
 for f in sorted(glob.glob(f"{src}/*.HEIC")):
     name = Path(f).stem
     img = decode_image(open(f, "rb").read(), MAX_UPLOAD_SIDE)
-    q = paper.detect_paper(img, expected_aspect=279.4 / 215.9)
-    o = paper.paper_orientation(q)
-    w, h = (279.4, 215.9) if o == "landscape" else (215.9, 279.4)
+    q = paper.detect_paper(img, expected_aspect=max(LETTER) / min(LETTER))
+    if q is None:
+        print(name, "paper NOT found; skipped")
+        continue
+    w, h = paper.sheet_size_mm(LETTER, paper.paper_orientation(q))
     rect, meta = paper.rectify(img, q, w, h)
     ppm = meta["px_per_mm"]
     mask = segment.auto_mask(rect)

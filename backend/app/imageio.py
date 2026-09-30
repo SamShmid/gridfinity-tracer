@@ -38,8 +38,14 @@ def decode_image(raw: bytes, max_side: int) -> np.ndarray:
     if w * h > MAX_PIXELS:
         raise ImageTooLarge(f"{w}x{h} px is over the {MAX_PIXELS // 1_000_000} megapixel limit")
     try:
-        pil = ImageOps.exif_transpose(pil).convert("RGB")
-        img = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+        pil = ImageOps.exif_transpose(pil)
+        if pil.mode in ("I", "I;16", "I;16B", "I;16L", "I;16N"):
+            # 16-bit grayscale (scanners, some cameras): PIL's convert("RGB") goes through mode "I"
+            # and clips everything above 255 to white, so a 0..65535 image becomes a blank sheet.
+            arr = np.asarray(pil, dtype=np.float32)
+            hi = 65535.0 if arr.max() > 255 else 255.0
+            pil = Image.fromarray(np.clip(arr * (255.0 / hi), 0, 255).astype(np.uint8))  # -> mode "L"
+        img = cv2.cvtColor(np.asarray(pil.convert("RGB")), cv2.COLOR_RGB2BGR)
     except Image.DecompressionBombError as e:
         raise ImageTooLarge(str(e)) from e
     except Exception as e:  # noqa: BLE001
