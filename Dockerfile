@@ -1,7 +1,7 @@
 # Base images are pinned by tag AND digest (multi-arch index digests, valid for linux/amd64 and
 # linux/arm64). Dependabot (.github/dependabot.yml, "docker") proposes bumps for both.
 # ---- frontend build -------------------------------------------------------
-FROM node:22.23.3-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS web
+FROM node:26.10.0-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS web
 WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
