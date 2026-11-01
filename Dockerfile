@@ -9,7 +9,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- backend --------------------------------------------------------------
-FROM python:3.12.14-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f AS app
+FROM python:3.12.16-slim@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07 AS app
 ENV PYTHONUNBUFFERED=1 \
     GT_MODELS_DIR=/models \
     GT_DATA_DIR=/data \
